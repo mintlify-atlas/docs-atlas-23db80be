@@ -1,0 +1,417 @@
+---
+title: McpClient Class
+description: API reference for the McpClient class in ModelContextProtocol.Client namespace
+---
+
+The `McpClient` class represents an instance of a Model Context Protocol (MCP) client session that connects to and communicates with an MCP server.
+
+## Namespace
+
+```csharp
+ModelContextProtocol.Client
+```
+
+## Inheritance
+
+`McpClient` → `McpSession` → `IAsyncDisposable`
+
+## Overview
+
+The `McpClient` class provides the primary interface for connecting to MCP servers and invoking their capabilities. It handles:
+
+- Server connection and initialization handshake
+- Tool execution
+- Prompt retrieval
+- Resource access and subscription
+- Session lifecycle management
+
+## Creating a Client
+
+### CreateAsync
+
+Creates an `McpClient`, connecting it to the specified server.
+
+```csharp
+public static async Task<McpClient> CreateAsync(
+    IClientTransport clientTransport,
+    McpClientOptions? clientOptions = null,
+    ILoggerFactory? loggerFactory = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="clientTransport" type="IClientTransport" required>
+  The transport instance used to communicate with the server.
+</ParamField>
+
+<ParamField path="clientOptions" type="McpClientOptions">
+  A client configuration object that specifies client capabilities and protocol version. If `null`, details based on the current process are used.
+</ParamField>
+
+<ParamField path="loggerFactory" type="ILoggerFactory">
+  A logger factory for creating loggers for clients.
+</ParamField>
+
+<ParamField path="cancellationToken" type="CancellationToken">
+  The cancellation token to monitor for cancellation requests.
+</ParamField>
+
+**Returns:** An `McpClient` that's connected to the specified server.
+
+**Exceptions:**
+- `ArgumentNullException`: `clientTransport` is null.
+- `HttpRequestException`: An error occurred while connecting to the server over HTTP.
+- `McpException`: The server returned an error response during initialization.
+
+<CodeGroup>
+```csharp Stdio Transport Example
+using ModelContextProtocol.Client;
+
+// Create stdio transport
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "node",
+    Arguments = ["server.js"]
+});
+
+// Connect to server
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+```csharp HTTP Transport Example
+using ModelContextProtocol.Client;
+
+// Create HTTP transport
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://example.com/mcp")
+});
+
+// Connect to server
+await using var client = await McpClient.CreateAsync(transport);
+```
+</CodeGroup>
+
+### ResumeSessionAsync
+
+Recreates an `McpClient` using an existing transport session without sending a new initialize request.
+
+```csharp
+public static async Task<McpClient> ResumeSessionAsync(
+    IClientTransport clientTransport,
+    ResumeClientSessionOptions resumeOptions,
+    McpClientOptions? clientOptions = null,
+    ILoggerFactory? loggerFactory = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="clientTransport" type="IClientTransport" required>
+  The transport instance already configured to connect to the target server.
+</ParamField>
+
+<ParamField path="resumeOptions" type="ResumeClientSessionOptions" required>
+  The metadata captured from the original session that should be applied when resuming.
+</ParamField>
+
+## Properties
+
+### ServerCapabilities
+
+Gets the capabilities supported by the connected server.
+
+```csharp
+public abstract ServerCapabilities ServerCapabilities { get; }
+```
+
+**Exceptions:** `InvalidOperationException` - The client is not connected.
+
+### ServerInfo
+
+Gets the implementation information of the connected server.
+
+```csharp
+public abstract Implementation ServerInfo { get; }
+```
+
+This property provides identification details about the connected server, including its name and version. It is populated during the initialization handshake.
+
+### ServerInstructions
+
+Gets any instructions describing how to use the connected server and its features.
+
+```csharp
+public abstract string? ServerInstructions { get; }
+```
+
+These instructions are provided by the server during initialization and can be used to improve an LLM's understanding of how to use the server effectively.
+
+### Completion
+
+Gets a `Task` that completes when the client session has completed.
+
+```csharp
+public abstract Task<ClientCompletionDetails> Completion { get; }
+```
+
+The task always completes successfully. The result provides details about why the session completed.
+
+## Tool Methods
+
+### ListToolsAsync
+
+Retrieves a list of available tools from the server.
+
+```csharp
+public async ValueTask<IList<McpClientTool>> ListToolsAsync(
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="options" type="RequestOptions">
+  Optional request options including metadata, serialization settings, and progress tracking.
+</ParamField>
+
+**Returns:** A list of all available tools as `McpClientTool` instances.
+
+```csharp Example
+var tools = await client.ListToolsAsync();
+foreach (var tool in tools)
+{
+    Console.WriteLine($"Tool: {tool.Name} - {tool.Description}");
+}
+```
+
+### CallToolAsync
+
+Invokes a tool on the server.
+
+```csharp
+public ValueTask<CallToolResult> CallToolAsync(
+    string toolName,
+    IReadOnlyDictionary<string, object?>? arguments = null,
+    IProgress<ProgressNotificationValue>? progress = null,
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="toolName" type="string" required>
+  The name of the tool to call on the server.
+</ParamField>
+
+<ParamField path="arguments" type="IReadOnlyDictionary<string, object?>">
+  An optional dictionary of arguments to pass to the tool.
+</ParamField>
+
+<ParamField path="progress" type="IProgress<ProgressNotificationValue>">
+  An optional progress reporter for server notifications.
+</ParamField>
+
+**Returns:** The `CallToolResult` from the tool execution.
+
+```csharp Example
+var result = await client.CallToolAsync(
+    "get_weather",
+    new Dictionary<string, object?>
+    {
+        ["location"] = "San Francisco",
+        ["units"] = "celsius"
+    });
+
+foreach (var content in result.Content)
+{
+    if (content is TextContentBlock text)
+    {
+        Console.WriteLine(text.Text);
+    }
+}
+```
+
+## Prompt Methods
+
+### ListPromptsAsync
+
+Retrieves a list of available prompts from the server.
+
+```csharp
+public async ValueTask<IList<McpClientPrompt>> ListPromptsAsync(
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+**Returns:** A list of all available prompts as `McpClientPrompt` instances.
+
+### GetPromptAsync
+
+Retrieves a specific prompt from the MCP server.
+
+```csharp
+public ValueTask<GetPromptResult> GetPromptAsync(
+    string name,
+    IReadOnlyDictionary<string, object?>? arguments = null,
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="name" type="string" required>
+  The name of the prompt to retrieve.
+</ParamField>
+
+<ParamField path="arguments" type="IReadOnlyDictionary<string, object?>">
+  Optional arguments for the prompt. The dictionary keys are parameter names, and the values are the argument values.
+</ParamField>
+
+**Returns:** A task containing the prompt's result with content and messages.
+
+```csharp Example
+var promptResult = await client.GetPromptAsync(
+    "code_review",
+    new Dictionary<string, object?>
+    {
+        ["language"] = "csharp",
+        ["code"] = sourceCode
+    });
+```
+
+## Resource Methods
+
+### ListResourcesAsync
+
+Retrieves a list of available resources from the server.
+
+```csharp
+public async ValueTask<IList<McpClientResource>> ListResourcesAsync(
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+**Returns:** A list of all available resources as `McpClientResource` instances.
+
+### ListResourceTemplatesAsync
+
+Retrieves a list of available resource templates from the server.
+
+```csharp
+public async ValueTask<IList<McpClientResourceTemplate>> ListResourceTemplatesAsync(
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+**Returns:** A list of all available resource templates.
+
+### ReadResourceAsync
+
+Reads a resource from the server.
+
+```csharp
+public ValueTask<ReadResourceResult> ReadResourceAsync(
+    string uri,
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="uri" type="string" required>
+  The URI of the resource.
+</ParamField>
+
+**Returns:** The result containing resource contents.
+
+```csharp Example
+var result = await client.ReadResourceAsync("file:///path/to/document.txt");
+foreach (var content in result.Contents)
+{
+    if (content is TextResourceContents textContent)
+    {
+        Console.WriteLine(textContent.Text);
+    }
+}
+```
+
+### SubscribeToResourceAsync
+
+Subscribes to a resource on the server to receive notifications when it changes.
+
+```csharp
+public async Task<IAsyncDisposable> SubscribeToResourceAsync(
+    string uri,
+    Func<ResourceUpdatedNotificationParams, CancellationToken, ValueTask> handler,
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="uri" type="string" required>
+  The URI of the resource to which to subscribe.
+</ParamField>
+
+<ParamField path="handler" type="Func<ResourceUpdatedNotificationParams, CancellationToken, ValueTask>" required>
+  The handler to invoke when the resource is updated.
+</ParamField>
+
+**Returns:** An `IAsyncDisposable` that, when disposed, unsubscribes from the resource and removes the notification handler.
+
+```csharp Example
+await using var subscription = await client.SubscribeToResourceAsync(
+    "file:///config.json",
+    async (notification, ct) =>
+    {
+        Console.WriteLine($"Resource updated: {notification.Uri}");
+    });
+
+// Subscription is automatically disposed when leaving scope
+```
+
+### UnsubscribeFromResourceAsync
+
+Unsubscribes from a resource on the server to stop receiving notifications about its changes.
+
+```csharp
+public Task UnsubscribeFromResourceAsync(
+    string uri,
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+## Other Methods
+
+### PingAsync
+
+Sends a ping request to verify server connectivity.
+
+```csharp
+public ValueTask<PingResult> PingAsync(
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+**Returns:** A task containing the ping result.
+
+### CompleteAsync
+
+Requests completion suggestions for a prompt argument or resource reference.
+
+```csharp
+public ValueTask<CompleteResult> CompleteAsync(
+    Reference reference,
+    string argumentName,
+    string argumentValue,
+    RequestOptions? options = null,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="reference" type="Reference" required>
+  The reference object specifying the type and optional URI or name.
+</ParamField>
+
+<ParamField path="argumentName" type="string" required>
+  The name of the argument for which completions are requested.
+</ParamField>
+
+<ParamField path="argumentValue" type="string" required>
+  The current value of the argument, used to filter relevant completions.
+</ParamField>
+
+**Returns:** A `CompleteResult` containing completion suggestions.
+
+## See Also
+
+- [McpSession](/api/core/mcp-session) - Base class providing core communication functionality
+- [Transports](/api/core/transports) - Transport classes for connecting to servers
+- [Protocol Types](/api/core/protocol-types) - MCP protocol types and messages

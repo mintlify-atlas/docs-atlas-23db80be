@@ -1,0 +1,409 @@
+---
+title: OAuth Authentication
+description: Secure your MCP servers with OAuth 2.0 authentication
+---
+
+The MCP C# SDK provides built-in OAuth 2.0 authentication support for securing MCP servers and clients. This includes automatic token management, dynamic client registration, and PKCE (Proof Key for Code Exchange) flow.
+
+## Client-Side Authentication
+
+### Basic OAuth Configuration
+
+Configure OAuth when creating the HTTP transport:
+
+```csharp
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+
+var transport = new HttpClientTransport(new()
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = new()
+    {
+        RedirectUri = new Uri("http://localhost:8080/callback"),
+        ClientId = "your-client-id",  // Optional - will use DCR if not provided
+        ClientSecret = "your-secret",  // Optional - for confidential clients
+    }
+});
+
+var client = await McpClient.CreateAsync(transport);
+```
+
+The SDK automatically:
+- Detects 401/403 responses requiring authentication
+- Discovers authorization servers from resource metadata
+- Performs the OAuth authorization code flow with PKCE
+- Manages access tokens and refresh tokens
+- Retries requests with fresh tokens
+
+### Custom Authorization Flow
+
+Provide a custom `AuthorizationRedirectDelegate` to control how the authorization URL is handled:
+
+```csharp ~/workspace/source/samples/ProtectedMcpClient/Program.cs
+var transport = new HttpClientTransport(new()
+{
+    Endpoint = new Uri(serverUrl),
+    OAuth = new()
+    {
+        RedirectUri = new Uri("http://localhost:1179/callback"),
+        AuthorizationRedirectDelegate = HandleAuthorizationUrlAsync,
+        DynamicClientRegistration = new()
+        {
+            ClientName = "MyMcpClient",
+        },
+    }
+});
+
+static async Task<string?> HandleAuthorizationUrlAsync(
+    Uri authorizationUrl,
+    Uri redirectUri,
+    CancellationToken cancellationToken)
+{
+    Console.WriteLine("Starting OAuth authorization flow...");
+    Console.WriteLine($"Opening browser to: {authorizationUrl}");
+
+    var listenerPrefix = redirectUri.GetLeftPart(UriPartial.Authority);
+    if (!listenerPrefix.EndsWith("/")) listenerPrefix += "/";
+
+    using var listener = new HttpListener();
+    listener.Prefixes.Add(listenerPrefix);
+
+    try
+    {
+        listener.Start();
+        Console.WriteLine($"Listening for OAuth callback on: {listenerPrefix}");
+
+        OpenBrowser(authorizationUrl);
+
+        var context = await listener.GetContextAsync();
+        var query = HttpUtility.ParseQueryString(context.Request.Url?.Query ?? string.Empty);
+        var code = query["code"];
+
+        // Send response to browser
+        string responseHtml = "<html><body><h1>Authentication complete</h1><p>You can close this window.</p></body></html>";
+        byte[] buffer = Encoding.UTF8.GetBytes(responseHtml);
+        context.Response.ContentLength64 = buffer.Length;
+        context.Response.ContentType = "text/html";
+        context.Response.OutputStream.Write(buffer, 0, buffer.Length);
+        context.Response.Close();
+
+        return code;
+    }
+    finally
+    {
+        if (listener.IsListening) listener.Stop();
+    }
+}
+```
+
+### Dynamic Client Registration
+
+When no `ClientId` is provided, the SDK automatically performs [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) dynamic client registration:
+
+```csharp
+var transport = new HttpClientTransport(new()
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = new()
+    {
+        RedirectUri = new Uri("http://localhost:8080/callback"),
+        DynamicClientRegistration = new()
+        {
+            ClientName = "My MCP Application",
+            ClientUri = new Uri("https://myapp.example.com"),
+            InitialAccessToken = "optional-registration-token",
+            ResponseDelegate = async (response, ct) =>
+            {
+                // Save client credentials for reuse
+                await SaveCredentialsAsync(response.ClientId, response.ClientSecret);
+            }
+        }
+    }
+});
+```
+
+### OAuth Options
+
+Complete `ClientOAuthOptions` configuration:
+
+```csharp
+OAuth = new()
+{
+    // Required: Where auth codes are sent after authorization
+    RedirectUri = new Uri("http://localhost:8080/callback"),
+
+    // Optional: Pre-registered client credentials
+    ClientId = "your-client-id",
+    ClientSecret = "your-client-secret",
+
+    // Optional: Client metadata document URL (alternative to DCR)
+    ClientMetadataDocumentUri = new Uri("https://myapp.example.com/.well-known/client"),
+
+    // Optional: Requested scopes (overrides server suggestions)
+    Scopes = new[] { "mcp.tools", "mcp.resources" },
+
+    // Optional: Select from multiple authorization servers
+    AuthServerSelector = (servers) => servers.FirstOrDefault(s => s.Host == "preferred.auth.com"),
+
+    // Optional: Custom authorization flow handler
+    AuthorizationRedirectDelegate = HandleAuthorizationUrlAsync,
+
+    // Optional: Dynamic client registration settings
+    DynamicClientRegistration = new()
+    {
+        ClientName = "My Application",
+        ClientUri = new Uri("https://myapp.example.com"),
+        InitialAccessToken = "initial-token",
+        ResponseDelegate = async (response, ct) => { /* Save credentials */ }
+    },
+
+    // Optional: Additional authorization parameters
+    AdditionalAuthorizationParameters = new Dictionary<string, string>
+    {
+        ["audience"] = "https://api.example.com"
+    },
+
+    // Optional: Token cache for persistence across sessions
+    TokenCache = new FileTokenCache("tokens.json")
+}
+```
+
+## Server-Side Authentication
+
+### Basic MCP Authentication
+
+Enable MCP authentication on the server:
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddAuthentication()
+    .AddMcpAuthentication(options =>
+    {
+        options.ResourceMetadata = new ProtectedResourceMetadata
+        {
+            Resource = "https://api.example.com/mcp",
+            AuthorizationServers = ["https://auth.example.com"],
+            ScopesSupported = ["mcp.tools", "mcp.resources"],
+            BearerMethodsSupported = ["header"]
+        };
+    });
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<MyTools>();
+
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapMcp();
+app.Run();
+```
+
+### Resource Metadata Discovery
+
+The MCP authentication handler automatically serves resource metadata at `/.well-known/oauth-protected-resource`:
+
+```http
+GET /.well-known/oauth-protected-resource HTTP/1.1
+Host: api.example.com
+
+HTTP/1.1 200 OK
+Content-Type: application/json
+
+{
+  "resource": "https://api.example.com/mcp",
+  "authorization_servers": ["https://auth.example.com"],
+  "scopes_supported": ["mcp.tools", "mcp.resources"],
+  "bearer_methods_supported": ["header"]
+}
+```
+
+### Custom Resource Metadata Path
+
+Configure a custom metadata endpoint path:
+
+```csharp
+.AddMcpAuthentication(options =>
+{
+    options.ResourceMetadataUri = new Uri("/api/mcp/metadata", UriKind.Relative);
+    options.ResourceMetadata = new ProtectedResourceMetadata
+    {
+        Resource = "https://api.example.com/mcp",
+        AuthorizationServers = ["https://auth.example.com"]
+    };
+});
+```
+
+### Authorization with Scopes
+
+Use ASP.NET Core authorization policies to protect specific tools or resources:
+
+```csharp
+builder.Services.AddAuthorization(options =>
+{
+    options.AddPolicy("RequireToolsScope", policy =>
+        policy.RequireClaim("scope", "mcp.tools"));
+
+    options.AddPolicy("RequireAdminScope", policy =>
+        policy.RequireClaim("scope", "mcp.admin"));
+});
+```
+
+Apply to MCP endpoints:
+
+```csharp
+[McpServerToolType]
+public class ProtectedTools
+{
+    [McpServerTool]
+    [Description("Public tool - no auth required")]
+    public static string PublicTool() => "Available to all";
+
+    [McpServerTool]
+    [Authorize(Policy = "RequireToolsScope")]
+    [Description("Protected tool - requires mcp.tools scope")]
+    public static string ProtectedTool() => "Requires authentication";
+
+    [McpServerTool]
+    [Authorize(Policy = "RequireAdminScope")]
+    [Description("Admin tool - requires mcp.admin scope")]
+    public static string AdminTool() => "Requires admin access";
+}
+```
+
+### JWT Bearer Authentication
+
+Integrate with JWT bearer tokens:
+
+```csharp
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = "https://auth.example.com";
+        options.Audience = "https://api.example.com";
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true
+        };
+    })
+    .AddMcpAuthentication(options =>
+    {
+        options.ResourceMetadata = new ProtectedResourceMetadata
+        {
+            Resource = "https://api.example.com/mcp",
+            AuthorizationServers = ["https://auth.example.com"]
+        };
+    });
+```
+
+## Token Management
+
+### Token Caching
+
+The SDK caches tokens in memory by default. Implement `ITokenCache` for persistence:
+
+```csharp
+public class FileTokenCache : ITokenCache
+{
+    private readonly string _filePath;
+
+    public FileTokenCache(string filePath) => _filePath = filePath;
+
+    public async Task<TokenContainer?> GetTokensAsync(CancellationToken cancellationToken)
+    {
+        if (!File.Exists(_filePath)) return null;
+
+        var json = await File.ReadAllTextAsync(_filePath, cancellationToken);
+        return JsonSerializer.Deserialize<TokenContainer>(json);
+    }
+
+    public async Task StoreTokensAsync(TokenContainer tokens, CancellationToken cancellationToken)
+    {
+        var json = JsonSerializer.Serialize(tokens);
+        await File.WriteAllTextAsync(_filePath, json, cancellationToken);
+    }
+}
+```
+
+Use the custom cache:
+
+```csharp
+OAuth = new()
+{
+    RedirectUri = new Uri("http://localhost:8080/callback"),
+    TokenCache = new FileTokenCache("oauth-tokens.json")
+}
+```
+
+### Automatic Token Refresh
+
+The SDK automatically refreshes expired tokens using refresh tokens:
+
+```csharp
+// First request: Performs OAuth flow and gets tokens
+var result1 = await client.CallToolAsync("myTool");
+
+// Later request: Automatically refreshes if access token expired
+var result2 = await client.CallToolAsync("myTool");
+```
+
+## Security Best Practices
+
+<Steps>
+  <Step title="Use HTTPS in production">
+    Always use HTTPS for production endpoints:
+
+    ```csharp
+    Endpoint = new Uri("https://api.example.com/mcp"), // ✅ HTTPS
+    // Endpoint = new Uri("http://api.example.com/mcp"), // ❌ HTTP
+    ```
+  </Step>
+
+  <Step title="Secure redirect URIs">
+    Use localhost for development, registered URIs for production:
+
+    ```csharp
+    // Development
+    RedirectUri = new Uri("http://localhost:8080/callback")
+
+    // Production
+    RedirectUri = new Uri("https://myapp.example.com/oauth/callback")
+    ```
+  </Step>
+
+  <Step title="Store credentials securely">
+    Never hardcode credentials. Use environment variables or secret managers:
+
+    ```csharp
+    ClientId = Environment.GetEnvironmentVariable("OAUTH_CLIENT_ID"),
+    ClientSecret = Environment.GetEnvironmentVariable("OAUTH_CLIENT_SECRET")
+    ```
+  </Step>
+
+  <Step title="Validate scopes">
+    Request minimum necessary scopes and validate on the server:
+
+    ```csharp
+    Scopes = new[] { "mcp.tools" }  // Minimal scopes
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  The SDK uses PKCE (Proof Key for Code Exchange) by default for additional security. This protects against authorization code interception attacks.
+</Warning>
+
+## API Reference
+
+- [`ClientOAuthOptions`](https://github.com/modelcontextprotocol/csharp-sdk) - Client OAuth configuration
+- [`McpAuthenticationOptions`](https://github.com/modelcontextprotocol/csharp-sdk) - Server authentication options
+- [`ProtectedResourceMetadata`](https://github.com/modelcontextprotocol/csharp-sdk) - Resource metadata structure
+- [`ITokenCache`](https://github.com/modelcontextprotocol/csharp-sdk) - Token cache interface
+- [MCP Authorization Spec](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization)

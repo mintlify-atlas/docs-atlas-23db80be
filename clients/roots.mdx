@@ -1,0 +1,364 @@
+---
+title: Filesystem Roots
+description: Provide filesystem roots to inform servers about relevant directories and project locations
+---
+
+Roots allow MCP clients to inform servers about relevant filesystem locations. This helps servers understand the working context and scope operations to specific directories or projects.
+
+## Overview
+
+Roots are a client-provided feature. The client declares root URIs during initialization, and servers can request them to understand which directories, projects, or repositories are relevant to the current session.
+
+### Common Use Cases
+
+- Scope file searches to project directories
+- Understand which repositories are being worked on
+- Limit operations to specific filesystem boundaries
+- Provide context about the user's workspace
+
+## Configuring Roots
+
+Set up a roots handler when creating the client:
+
+```csharp
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        RootsHandler = (request, cancellationToken) =>
+        {
+            return ValueTask.FromResult(new ListRootsResult
+            {
+                Roots =
+                [
+                    new Root
+                    {
+                        Uri = "file:///home/user/projects/my-app",
+                        Name = "My Application"
+                    },
+                    new Root
+                    {
+                        Uri = "file:///home/user/projects/shared-lib",
+                        Name = "Shared Library"
+                    }
+                ]
+            });
+        }
+    }
+};
+
+await using var client = await McpClient.CreateAsync(transport, options);
+```
+
+## Dynamic Roots
+
+Roots can be determined dynamically based on runtime conditions:
+
+```csharp
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        RootsHandler = (request, cancellationToken) =>
+        {
+            var roots = new List<Root>();
+
+            // Add current working directory
+            roots.Add(new Root
+            {
+                Uri = new Uri(Directory.GetCurrentDirectory()).AbsoluteUri,
+                Name = "Current Directory"
+            });
+
+            // Add git repositories
+            var gitRoot = FindGitRoot(Directory.GetCurrentDirectory());
+            if (gitRoot is not null)
+            {
+                roots.Add(new Root
+                {
+                    Uri = new Uri(gitRoot).AbsoluteUri,
+                    Name = "Git Repository"
+                });
+            }
+
+            // Add user's home directory
+            roots.Add(new Root
+            {
+                Uri = new Uri(Environment.GetFolderPath(
+                    Environment.SpecialFolder.UserProfile
+                )).AbsoluteUri,
+                Name = "Home"
+            });
+
+            return ValueTask.FromResult(new ListRootsResult
+            {
+                Roots = roots
+            });
+        }
+    }
+};
+
+static string? FindGitRoot(string path)
+{
+    var dir = new DirectoryInfo(path);
+    while (dir is not null)
+    {
+        if (Directory.Exists(Path.Combine(dir.FullName, ".git")))
+        {
+            return dir.FullName;
+        }
+        dir = dir.Parent;
+    }
+    return null;
+}
+```
+
+## Root URIs
+
+Roots use URIs to identify locations. Common schemes:
+
+- `file://` - Local filesystem paths
+- `http://` / `https://` - Remote resources
+- Custom schemes - Application-specific locations
+
+```csharp
+RootsHandler = (request, cancellationToken) =>
+{
+    return ValueTask.FromResult(new ListRootsResult
+    {
+        Roots =
+        [
+            // Local directory
+            new Root
+            {
+                Uri = "file:///C:/Projects/MyApp",
+                Name = "My App"
+            },
+            // Remote repository
+            new Root
+            {
+                Uri = "https://github.com/user/repo",
+                Name = "GitHub Repo"
+            },
+            // Custom scheme
+            new Root
+            {
+                Uri = "workspace://project1",
+                Name = "Project 1"
+            }
+        ]
+    });
+}
+```
+
+## Roots Change Notifications
+
+Notify the server when roots change (e.g., user opens a new project):
+
+```csharp
+await using var client = await McpClient.CreateAsync(transport, options);
+
+// Later, when roots change...
+await client.SendNotificationAsync(
+    NotificationMethods.RootsListChangedNotification,
+    new RootsListChangedNotificationParams()
+);
+```
+
+The server will call `RootsHandler` again to get the updated list.
+
+## Complete Example
+
+Here's a complete example with dynamic roots and change notifications:
+
+```csharp
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+
+class RootsManager
+{
+    private readonly List<Root> _roots = [];
+    private McpClient? _client;
+
+    public void Initialize()
+    {
+        // Start with current directory
+        AddRoot(Directory.GetCurrentDirectory(), "Current Directory");
+    }
+
+    public void AddRoot(string path, string? name = null)
+    {
+        var uri = new Uri(Path.GetFullPath(path)).AbsoluteUri;
+        
+        if (_roots.Any(r => r.Uri == uri))
+        {
+            return; // Already exists
+        }
+
+        _roots.Add(new Root
+        {
+            Uri = uri,
+            Name = name ?? Path.GetFileName(path)
+        });
+
+        // Notify server of change
+        _ = NotifyChangeAsync();
+    }
+
+    public void RemoveRoot(string path)
+    {
+        var uri = new Uri(Path.GetFullPath(path)).AbsoluteUri;
+        if (_roots.RemoveAll(r => r.Uri == uri) > 0)
+        {
+            _ = NotifyChangeAsync();
+        }
+    }
+
+    public async Task<McpClient> CreateClientAsync(
+        IClientTransport transport
+    )
+    {
+        var options = new McpClientOptions
+        {
+            Handlers = new()
+            {
+                RootsHandler = HandleRootsRequest
+            }
+        };
+
+        _client = await McpClient.CreateAsync(transport, options);
+        return _client;
+    }
+
+    private ValueTask<ListRootsResult> HandleRootsRequest(
+        ListRootsRequestParams? request,
+        CancellationToken cancellationToken
+    )
+    {
+        return ValueTask.FromResult(new ListRootsResult
+        {
+            Roots = [.. _roots]
+        });
+    }
+
+    private async Task NotifyChangeAsync()
+    {
+        if (_client is not null)
+        {
+            await _client.SendNotificationAsync(
+                NotificationMethods.RootsListChangedNotification,
+                new RootsListChangedNotificationParams()
+            );
+        }
+    }
+}
+
+// Usage
+var rootsManager = new RootsManager();
+rootsManager.Initialize();
+
+var transport = new StdioClientTransport(new()
+{
+    Command = "npx",
+    Arguments = ["-y", "@modelcontextprotocol/server-filesystem"]
+});
+
+await using var client = await rootsManager.CreateClientAsync(transport);
+
+// Later, add a new project root
+rootsManager.AddRoot("/home/user/projects/new-project", "New Project");
+```
+
+## Server-Side Usage
+
+Servers request roots to understand the client's context:
+
+```csharp
+// In a server tool
+var result = await server.RequestRootsAsync(
+    new ListRootsRequestParams(),
+    cancellationToken
+);
+
+foreach (var root in result.Roots)
+{
+    Console.WriteLine($"Root: {root.Name} at {root.Uri}");
+}
+```
+
+Servers can also listen for changes:
+
+```csharp
+server.RegisterNotificationHandler(
+    NotificationMethods.RootsListChangedNotification,
+    async (notification, cancellationToken) =>
+    {
+        // Re-request roots to get updated list
+        var result = await server.RequestRootsAsync(
+            new ListRootsRequestParams(),
+            cancellationToken
+        );
+        
+        Console.WriteLine($"Roots updated: {result.Roots.Count} roots");
+    }
+);
+```
+
+## Best Practices
+
+<Tip>
+**Use meaningful names**: Provide descriptive names for roots to help servers understand their purpose.
+</Tip>
+
+<Warning>
+**Security**: Only expose directories that the server should have access to. Don't expose sensitive system directories.
+</Warning>
+
+<Note>
+**Absolute URIs**: Always use absolute URIs for roots. Relative paths may be ambiguous.
+</Note>
+
+## Capability Negotiation
+
+When a `RootsHandler` is configured, the client automatically advertises the `roots` capability:
+
+```csharp
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        RootsHandler = myRootsHandler
+    }
+    // Capabilities.Roots is set automatically
+};
+```
+
+To advertise support for change notifications:
+
+```csharp
+var options = new McpClientOptions
+{
+    Capabilities = new ClientCapabilities
+    {
+        Roots = new RootsCapability { ListChanged = true }
+    },
+    Handlers = new()
+    {
+        RootsHandler = myRootsHandler
+    }
+};
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Elicitation" icon="circle-question" href="/clients/elicitation">
+    Handle URL elicitation for protected resources
+  </Card>
+  <Card title="Connecting" icon="plug" href="/clients/connecting">
+    Learn about client connection options
+  </Card>
+</CardGroup>

@@ -1,0 +1,462 @@
+---
+title: MCP Server Filters
+description: Add cross-cutting concerns to MCP handlers with filters
+---
+
+Filters in the MCP C# SDK allow you to add cross-cutting concerns to your server handlers, such as logging, authentication, rate limiting, or telemetry.
+
+## Overview
+
+The SDK provides two types of filters:
+
+- **Message Filters**: Intercept all incoming and outgoing JSON-RPC messages
+- **Request Filters**: Intercept specific MCP request handlers (tools, prompts, resources, etc.)
+
+## Message Filters
+
+Message filters operate at the JSON-RPC message level and can inspect or modify all messages.
+
+### Adding Message Filters
+
+```csharp Program.cs
+using ModelContextProtocol;
+using ModelContextProtocol.Server;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithMessageFilters(filters =>
+    {
+        // Add incoming message filter
+        filters.AddIncomingFilter(async (context, next) =>
+        {
+            var logger = context.Services.GetRequiredService<ILogger<Program>>();
+            logger.LogInformation("Incoming message: {Message}", context.Message);
+            
+            await next(context);
+        });
+
+        // Add outgoing message filter
+        filters.AddOutgoingFilter(async (context, next) =>
+        {
+            var logger = context.Services.GetRequiredService<ILogger<Program>>();
+            logger.LogInformation("Outgoing message: {Message}", context.Message);
+            
+            await next(context);
+        });
+    });
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+### Incoming Message Filter
+
+Process messages from clients:
+
+```csharp
+filters.AddIncomingFilter(async (context, next) =>
+{
+    var startTime = DateTime.UtcNow;
+    
+    try
+    {
+        // Pre-processing
+        var logger = context.Services.GetRequiredService<ILogger<Program>>();
+        logger.LogDebug("Processing incoming message");
+        
+        // Call next filter in pipeline
+        await next(context);
+        
+        // Post-processing
+        var duration = DateTime.UtcNow - startTime;
+        logger.LogDebug("Message processed in {Duration}ms", duration.TotalMilliseconds);
+    }
+    catch (Exception ex)
+    {
+        var logger = context.Services.GetRequiredService<ILogger<Program>>();
+        logger.LogError(ex, "Error processing message");
+        throw;
+    }
+});
+```
+
+### Outgoing Message Filter
+
+Process messages sent to clients:
+
+```csharp
+filters.AddOutgoingFilter(async (context, next) =>
+{
+    // Add custom metadata to outgoing messages
+    var telemetry = context.Services.GetRequiredService<TelemetryService>();
+    telemetry.RecordOutgoingMessage(context.Message);
+    
+    await next(context);
+});
+```
+
+## Request Filters
+
+Request filters target specific MCP request types (tools, prompts, resources, etc.) and provide strongly-typed access to request parameters.
+
+### Adding Request Filters
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithRequestFilters(filters =>
+    {
+        // Filter for tool calls
+        filters.AddCallToolFilter(async (context, next) =>
+        {
+            var logger = context.Services.GetRequiredService<ILogger<Program>>();
+            logger.LogInformation(
+                "Calling tool: {ToolName}",
+                context.Params?.Name);
+            
+            var result = await next(context);
+            
+            logger.LogInformation(
+                "Tool completed: {ToolName}",
+                context.Params?.Name);
+            
+            return result;
+        });
+
+        // Filter for resource reads
+        filters.AddReadResourceFilter(async (context, next) =>
+        {
+            var logger = context.Services.GetRequiredService<ILogger<Program>>();
+            logger.LogInformation(
+                "Reading resource: {Uri}",
+                context.Params?.Uri);
+            
+            return await next(context);
+        });
+
+        // Filter for prompt gets
+        filters.AddGetPromptFilter(async (context, next) =>
+        {
+            var logger = context.Services.GetRequiredService<ILogger<Program>>();
+            logger.LogInformation(
+                "Getting prompt: {PromptName}",
+                context.Params?.Name);
+            
+            return await next(context);
+        });
+    });
+```
+
+### Available Request Filters
+
+The SDK provides filters for all MCP request types:
+
+<Steps>
+  <Step title="Tool Filters">
+    ```csharp
+    filters.AddListToolsFilter(async (context, next) => { /* ... */ });
+    filters.AddCallToolFilter(async (context, next) => { /* ... */ });
+    ```
+  </Step>
+
+  <Step title="Resource Filters">
+    ```csharp
+    filters.AddListResourceTemplatesFilter(async (context, next) => { /* ... */ });
+    filters.AddListResourcesFilter(async (context, next) => { /* ... */ });
+    filters.AddReadResourceFilter(async (context, next) => { /* ... */ });
+    filters.AddSubscribeToResourcesFilter(async (context, next) => { /* ... */ });
+    filters.AddUnsubscribeFromResourcesFilter(async (context, next) => { /* ... */ });
+    ```
+  </Step>
+
+  <Step title="Prompt Filters">
+    ```csharp
+    filters.AddListPromptsFilter(async (context, next) => { /* ... */ });
+    filters.AddGetPromptFilter(async (context, next) => { /* ... */ });
+    ```
+  </Step>
+
+  <Step title="Other Filters">
+    ```csharp
+    filters.AddCompleteFilter(async (context, next) => { /* ... */ });
+    filters.AddSetLoggingLevelFilter(async (context, next) => { /* ... */ });
+    ```
+  </Step>
+</Steps>
+
+## Filter Context
+
+Filters receive a context object with access to:
+
+<ParamField path="Params" type="TParams">
+  Strongly-typed request parameters (e.g., `CallToolRequestParams`).
+</ParamField>
+
+<ParamField path="Services" type="IServiceProvider">
+  Service provider for dependency injection.
+</ParamField>
+
+<ParamField path="Server" type="McpServer">
+  The MCP server instance handling the request.
+</ParamField>
+
+<ParamField path="Message" type="JsonRpcMessage">
+  The underlying JSON-RPC message (for message filters).
+</ParamField>
+
+## Common Filter Patterns
+
+### Logging Filter
+
+Log all tool invocations:
+
+```csharp
+filters.AddCallToolFilter(async (context, next) =>
+{
+    var logger = context.Services.GetRequiredService<ILogger<Program>>();
+    var toolName = context.Params?.Name;
+    
+    logger.LogInformation(
+        "Tool called: {ToolName} by session {SessionId}",
+        toolName,
+        context.Server.SessionId);
+    
+    var stopwatch = Stopwatch.StartNew();
+    
+    try
+    {
+        var result = await next(context);
+        
+        stopwatch.Stop();
+        logger.LogInformation(
+            "Tool completed: {ToolName} in {Duration}ms",
+            toolName,
+            stopwatch.ElapsedMilliseconds);
+        
+        return result;
+    }
+    catch (Exception ex)
+    {
+        stopwatch.Stop();
+        logger.LogError(
+            ex,
+            "Tool failed: {ToolName} after {Duration}ms",
+            toolName,
+            stopwatch.ElapsedMilliseconds);
+        throw;
+    }
+});
+```
+
+### Authentication Filter
+
+Validate access to resources:
+
+```csharp
+filters.AddReadResourceFilter(async (context, next) =>
+{
+    var authService = context.Services.GetRequiredService<IAuthorizationService>();
+    var httpContext = context.Services.GetRequiredService<IHttpContextAccessor>().HttpContext;
+    var user = httpContext?.User;
+    
+    if (user == null || !user.Identity?.IsAuthenticated == true)
+    {
+        throw new McpException("Authentication required");
+    }
+    
+    var uri = context.Params?.Uri;
+    var authorized = await authService.AuthorizeAsync(
+        user,
+        uri,
+        "ReadResource");
+    
+    if (!authorized.Succeeded)
+    {
+        throw new McpException($"Access denied to resource: {uri}");
+    }
+    
+    return await next(context);
+});
+```
+
+### Rate Limiting Filter
+
+Limit request rates per session:
+
+```csharp
+public class RateLimitingFilter
+{
+    private readonly ConcurrentDictionary<string, SemaphoreSlim> _rateLimiters = new();
+    
+    public async Task<CallToolResult> ApplyAsync(
+        RequestContext<CallToolRequestParams> context,
+        McpRequestHandler<CallToolRequestParams, CallToolResult> next)
+    {
+        var sessionId = context.Server.SessionId ?? "anonymous";
+        var limiter = _rateLimiters.GetOrAdd(
+            sessionId,
+            _ => new SemaphoreSlim(5, 5)); // 5 concurrent requests
+        
+        if (!await limiter.WaitAsync(TimeSpan.FromSeconds(10)))
+        {
+            throw new McpException("Rate limit exceeded");
+        }
+        
+        try
+        {
+            return await next(context);
+        }
+        finally
+        {
+            limiter.Release();
+        }
+    }
+}
+
+// Register the filter
+var rateLimiter = new RateLimitingFilter();
+filters.AddCallToolFilter(rateLimiter.ApplyAsync);
+```
+
+### Telemetry Filter
+
+Collect metrics and traces:
+
+```csharp
+filters.AddCallToolFilter(async (context, next) =>
+{
+    var telemetry = context.Services.GetRequiredService<TelemetryClient>();
+    
+    using var operation = telemetry.StartOperation<RequestTelemetry>("CallTool");
+    operation.Telemetry.Properties["ToolName"] = context.Params?.Name ?? "unknown";
+    operation.Telemetry.Properties["SessionId"] = context.Server.SessionId ?? "none";
+    
+    try
+    {
+        var result = await next(context);
+        operation.Telemetry.Success = !result.IsError;
+        return result;
+    }
+    catch (Exception ex)
+    {
+        operation.Telemetry.Success = false;
+        telemetry.TrackException(ex);
+        throw;
+    }
+});
+```
+
+### Caching Filter
+
+Cache resource responses:
+
+```csharp
+public class ResourceCachingFilter
+{
+    private readonly IMemoryCache _cache;
+    
+    public ResourceCachingFilter(IMemoryCache cache)
+    {
+        _cache = cache;
+    }
+    
+    public async Task<ReadResourceResult> ApplyAsync(
+        RequestContext<ReadResourceRequestParams> context,
+        McpRequestHandler<ReadResourceRequestParams, ReadResourceResult> next)
+    {
+        var uri = context.Params?.Uri;
+        if (uri == null)
+        {
+            return await next(context);
+        }
+        
+        var cacheKey = $"resource:{uri}";
+        
+        if (_cache.TryGetValue<ReadResourceResult>(cacheKey, out var cached))
+        {
+            return cached;
+        }
+        
+        var result = await next(context);
+        
+        _cache.Set(
+            cacheKey,
+            result,
+            TimeSpan.FromMinutes(5));
+        
+        return result;
+    }
+}
+
+// Register with DI
+builder.Services.AddMemoryCache();
+builder.Services.AddSingleton<ResourceCachingFilter>();
+
+// Apply filter
+filters.AddReadResourceFilter(
+    (context, next) => context.Services
+        .GetRequiredService<ResourceCachingFilter>()
+        .ApplyAsync(context, next));
+```
+
+## Filter Execution Order
+
+Filters execute in registration order:
+
+```csharp
+filters
+    .AddCallToolFilter(async (context, next) =>
+    {
+        Console.WriteLine("Filter 1: Before");
+        var result = await next(context);
+        Console.WriteLine("Filter 1: After");
+        return result;
+    })
+    .AddCallToolFilter(async (context, next) =>
+    {
+        Console.WriteLine("Filter 2: Before");
+        var result = await next(context);
+        Console.WriteLine("Filter 2: After");
+        return result;
+    });
+
+// Output:
+// Filter 1: Before
+// Filter 2: Before
+// [Handler executes]
+// Filter 2: After
+// Filter 1: After
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Keep Filters Focused">
+    Each filter should handle a single concern (logging, auth, etc.). Compose multiple filters for complex scenarios.
+  </Step>
+
+  <Step title="Handle Exceptions">
+    Catch and handle exceptions appropriately. Decide whether to suppress, transform, or rethrow them.
+  </Step>
+
+  <Step title="Use Dependency Injection">
+    Access services through `context.Services` rather than capturing dependencies in closures.
+  </Step>
+
+  <Step title="Be Async-Aware">
+    Always await `next(context)` and return the result. Don't use `.Result` or `.Wait()`.
+  </Step>
+
+  <Step title="Consider Performance">
+    Filters execute on every request. Keep them fast and avoid expensive operations.
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Learn about [Tools](/servers/tools) for executable functions
+- Explore [ASP.NET Core integration](/servers/aspnetcore) for HTTP servers
+- Add [Logging](/servers/logging) for diagnostics

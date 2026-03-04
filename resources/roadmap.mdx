@@ -1,0 +1,108 @@
+---
+title: Roadmap
+description: MCP C# SDK roadmap and specification implementation tracking
+---
+
+The MCP C# SDK is actively developed to stay current with the Model Context Protocol specification and to support the needs of the .NET developer community.
+
+## Spec Implementation Tracking
+
+The C# SDK tracks implementation of MCP spec components using the [modelcontextprotocol project boards](https://github.com/orgs/modelcontextprotocol/projects?query=is%3Aopen), with a dedicated project board for each spec revision.
+
+<Card title="2025-11-25 Spec Revision" icon="clipboard-check" href="https://github.com/orgs/modelcontextprotocol/projects/26">
+  View the project board tracking implementation of the 2025-11-25 specification revision
+</Card>
+
+## Current Focus Areas
+
+The SDK team is currently focused on the following areas:
+
+### Next Spec Revision
+
+The next MCP specification revision is being developed in the [protocol repository](https://github.com/modelcontextprotocol/modelcontextprotocol). The C# SDK already has experimental support for [Tasks](concepts/tasks/tasks.md) (experimental in the specification), which will be updated as the specification is revised.
+
+<Note>
+Tasks are marked as experimental and may change as the specification evolves. See the [Experimental APIs](/resources/experimental) documentation for details.
+</Note>
+
+### Feedback and End-to-End Scenarios
+
+The C# SDK team is actively responding to feedback and continuing to explore end-to-end scenarios for opportunities to add more APIs that implement common patterns.
+
+**How you can help:**
+- Share your use cases and scenarios in [GitHub Discussions](https://github.com/modelcontextprotocol/csharp-sdk/discussions)
+- Report bugs and request features in [GitHub Issues](https://github.com/modelcontextprotocol/csharp-sdk/issues)
+- Contribute code and documentation via pull requests
+
+## Milestones
+
+See the [milestones page](https://github.com/modelcontextprotocol/csharp-sdk/milestones) to see which issues and features are being planned for future versions.
+
+<CardGroup cols={2}>
+  <Card title="View Milestones" icon="flag-checkered" href="https://github.com/modelcontextprotocol/csharp-sdk/milestones">
+    Track planned features and releases on GitHub
+  </Card>
+  <Card title="View Issues" icon="bug" href="https://github.com/modelcontextprotocol/csharp-sdk/issues">
+    Browse open issues and feature requests
+  </Card>
+</CardGroup>
+
+## Feature Status
+
+The SDK implements the core MCP specification with the following status:
+
+<Accordion title="Stable Features">
+  - Client implementation
+  - Server implementation (stdio and HTTP)
+  - Resources API
+  - Tools API
+  - Prompts API
+  - Sampling API
+  - Logging API
+  - Hosting and dependency injection
+  - ASP.NET Core integration
+</Accordion>
+
+<Accordion title="Experimental Features">
+  - Tasks API (experimental in the specification)
+</Accordion>
+
+<Accordion title="Planned Enhancements">
+  Check the [milestones page](https://github.com/modelcontextprotocol/csharp-sdk/milestones) for upcoming features and improvements.
+</Accordion>
+
+## Version Planning
+
+For more information about the C# SDK's approach to versioning, breaking changes, and support, see the [Versioning](/resources/versioning) documentation.
+
+<Note>
+The SDK follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.html) to provide predictable version increments and clear compatibility guarantees.
+</Note>
+
+## Contributing to the Roadmap
+
+The roadmap is shaped by community feedback and contributions. You can influence the direction of the SDK by:
+
+1. **Opening feature requests** in [GitHub Issues](https://github.com/modelcontextprotocol/csharp-sdk/issues) with detailed use cases
+2. **Participating in discussions** on existing issues and pull requests
+3. **Upvoting issues** (👍) that are important to your scenarios
+4. **Contributing code** for features you need
+
+See the [Contributing Guide](/resources/contributing) for more information on how to get involved.
+
+## Stay Updated
+
+<CardGroup cols={2}>
+  <Card title="Release Notes" icon="note" href="https://github.com/modelcontextprotocol/csharp-sdk/releases">
+    View detailed release notes for each version
+  </Card>
+  <Card title="GitHub Repository" icon="github" href="https://github.com/modelcontextprotocol/csharp-sdk">
+    Watch the repository for updates and announcements
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+- Review the [versioning policy](/resources/versioning)
+- Explore [experimental features](/resources/experimental)
+- Learn how to [contribute](/resources/contributing) to the SDK

@@ -1,0 +1,420 @@
+---
+title: Protocol Types
+description: API reference for MCP protocol types including Tool, Prompt, Resource, and Content types
+---
+
+The MCP C# SDK provides strongly-typed representations of all Model Context Protocol types defined in the specification.
+
+## Namespace
+
+```csharp
+ModelContextProtocol.Protocol
+```
+
+## Core Protocol Types
+
+### Tool
+
+Represents a tool that the server is capable of calling.
+
+```csharp
+public sealed class Tool : IBaseMetadata
+```
+
+#### Properties
+
+<ResponseField name="Name" type="string" required>
+  The unique identifier for the tool.
+</ResponseField>
+
+<ResponseField name="Title" type="string">
+  A human-readable display name for the tool.
+</ResponseField>
+
+<ResponseField name="Description" type="string">
+  A human-readable description of the tool that helps AI models understand what the tool does and when to use it.
+</ResponseField>
+
+<ResponseField name="InputSchema" type="JsonElement">
+  A JSON Schema object defining the expected parameters for the tool. Must be a valid JSON Schema object with "type" property set to "object".
+</ResponseField>
+
+<ResponseField name="OutputSchema" type="JsonElement">
+  A JSON Schema object defining the expected structured outputs for the tool. Describes the shape of data returned in `CallToolResult.StructuredContent`.
+</ResponseField>
+
+<ResponseField name="Annotations" type="ToolAnnotations">
+  Optional additional tool information and behavior hints, such as whether the tool is read-only, destructive, idempotent, or operates in an open world.
+</ResponseField>
+
+<ResponseField name="Execution" type="ToolExecution">
+  Execution-related metadata for this tool, particularly regarding task augmentation support.
+</ResponseField>
+
+<ResponseField name="Icons" type="IList<Icon>">
+  An optional list of icons for this tool.
+</ResponseField>
+
+```csharp Example
+var tool = new Tool
+{
+    Name = "get_weather",
+    Description = "Get current weather for a location",
+    InputSchema = JsonSerializer.SerializeToElement(new
+    {
+        type = "object",
+        properties = new
+        {
+            location = new { type = "string", description = "City name" },
+            units = new { type = "string", @enum = new[] { "celsius", "fahrenheit" } }
+        },
+        required = new[] { "location" }
+    })
+};
+```
+
+### Prompt
+
+Represents a prompt that the server offers.
+
+```csharp
+public sealed class Prompt : IBaseMetadata
+```
+
+#### Properties
+
+<ResponseField name="Name" type="string" required>
+  The unique identifier for the prompt.
+</ResponseField>
+
+<ResponseField name="Title" type="string">
+  A human-readable display name for the prompt.
+</ResponseField>
+
+<ResponseField name="Description" type="string">
+  An optional description of what this prompt provides.
+</ResponseField>
+
+<ResponseField name="Arguments" type="IList<PromptArgument>">
+  A list of arguments that this prompt accepts for templating and customization.
+</ResponseField>
+
+<ResponseField name="Icons" type="IList<Icon>">
+  An optional list of icons for this prompt.
+</ResponseField>
+
+```csharp Example
+var prompt = new Prompt
+{
+    Name = "code_review",
+    Description = "Review code for best practices and potential issues",
+    Arguments = new[]
+    {
+        new PromptArgument
+        {
+            Name = "language",
+            Description = "Programming language",
+            Required = true
+        },
+        new PromptArgument
+        {
+            Name = "code",
+            Description = "Code to review",
+            Required = true
+        }
+    }
+};
+```
+
+### Resource
+
+Represents a known resource that the server is capable of reading.
+
+```csharp
+public sealed class Resource : IBaseMetadata
+```
+
+#### Properties
+
+<ResponseField name="Name" type="string" required>
+  The unique identifier for the resource.
+</ResponseField>
+
+<ResponseField name="Title" type="string">
+  A human-readable display name for the resource.
+</ResponseField>
+
+<ResponseField name="Uri" type="string" required>
+  The URI of this resource.
+</ResponseField>
+
+<ResponseField name="Description" type="string">
+  A description of what this resource represents.
+</ResponseField>
+
+<ResponseField name="MimeType" type="string">
+  The MIME type of this resource (e.g., "text/plain", "application/json", "image/png").
+</ResponseField>
+
+<ResponseField name="Annotations" type="Annotations">
+  Optional annotations specifying the intended audience (User, Assistant, or both) and priority level.
+</ResponseField>
+
+<ResponseField name="Size" type="long">
+  The size of the raw resource content (before base64 encoding), in bytes, if known.
+</ResponseField>
+
+<ResponseField name="Icons" type="IList<Icon>">
+  An optional list of icons for this resource.
+</ResponseField>
+
+```csharp Example
+var resource = new Resource
+{
+    Name = "config",
+    Uri = "file:///app/config.json",
+    Description = "Application configuration file",
+    MimeType = "application/json"
+};
+```
+
+### ResourceTemplate
+
+Represents a known resource template that the server is capable of reading.
+
+```csharp
+public sealed class ResourceTemplate : IBaseMetadata
+```
+
+#### Properties
+
+<ResponseField name="Name" type="string" required>
+  The unique identifier for the resource template.
+</ResponseField>
+
+<ResponseField name="UriTemplate" type="string" required>
+  The URI template (according to RFC 6570) that can be used to construct resource URIs.
+</ResponseField>
+
+<ResponseField name="Description" type="string">
+  A description of what this resource template represents.
+</ResponseField>
+
+<ResponseField name="MimeType" type="string">
+  The MIME type of resources generated from this template.
+</ResponseField>
+
+<ResponseField name="IsTemplated" type="bool">
+  Gets a value that indicates whether UriTemplate contains any template expressions.
+</ResponseField>
+
+```csharp Example
+var template = new ResourceTemplate
+{
+    Name = "user_profile",
+    UriTemplate = "users://{userId}/profile",
+    Description = "User profile data",
+    MimeType = "application/json"
+};
+```
+
+## Content Types
+
+### ContentBlock
+
+Base class for different types of content in MCP messages.
+
+#### Derived Types
+
+- `TextContentBlock`: Plain text content
+- `ImageContentBlock`: Base64-encoded image data
+- `AudioContentBlock`: Base64-encoded audio data  
+- `EmbeddedResourceContentBlock`: Reference to an embedded resource
+
+```csharp Example
+// Text content
+var textContent = new TextContentBlock
+{
+    Text = "Hello, world!"
+};
+
+// Image content
+var imageContent = new ImageContentBlock
+{
+    Data = Convert.ToBase64String(imageBytes),
+    MimeType = "image/png"
+};
+```
+
+### PromptMessage
+
+Represents a message within the Model Context Protocol system.
+
+```csharp
+public sealed class PromptMessage
+```
+
+<ResponseField name="Content" type="ContentBlock" required>
+  The content of the message, which can be text, image, audio, or an embedded resource.
+</ResponseField>
+
+<ResponseField name="Role" type="Role" required>
+  The role of the message sender (User or Assistant).
+</ResponseField>
+
+```csharp Example
+var message = new PromptMessage
+{
+    Role = Role.User,
+    Content = new TextContentBlock { Text = "What's the weather?" }
+};
+```
+
+## Result Types
+
+### CallToolResult
+
+Represents the result of a tool call request.
+
+```csharp
+public sealed class CallToolResult : Result
+```
+
+<ResponseField name="Content" type="IList<ContentBlock>" required>
+  The response content from the tool call.
+</ResponseField>
+
+<ResponseField name="StructuredContent" type="JsonElement">
+  An optional JSON object representing the structured result of the tool call.
+</ResponseField>
+
+<ResponseField name="IsError" type="bool">
+  Indicates whether the tool call was unsuccessful. When `true`, the tool execution failed and details are in the Content property.
+</ResponseField>
+
+<ResponseField name="Task" type="McpTask">
+  The task data for newly created task (task-augmented tool calls only).
+</ResponseField>
+
+```csharp Example - Success
+var result = new CallToolResult
+{
+    Content = new[]
+    {
+        new TextContentBlock { Text = "Temperature: 22°C" }
+    }
+};
+```
+
+```csharp Example - Error
+var result = new CallToolResult
+{
+    IsError = true,
+    Content = new[]
+    {
+        new TextContentBlock { Text = "Invalid location provided" }
+    }
+};
+```
+
+### GetPromptResult
+
+Represents the result of a prompt retrieval request.
+
+```csharp
+public sealed class GetPromptResult : Result
+```
+
+<ResponseField name="Messages" type="IList<PromptMessage>" required>
+  The messages that make up the prompt.
+</ResponseField>
+
+<ResponseField name="Description" type="string">
+  An optional description of the prompt.
+</ResponseField>
+
+### ReadResourceResult
+
+Represents the result of a resource read request.
+
+```csharp
+public sealed class ReadResourceResult : Result
+```
+
+<ResponseField name="Contents" type="IList<ResourceContents>" required>
+  The contents of the resource.
+</ResponseField>
+
+## Enumerations
+
+### Role
+
+Specifies the role of a message sender.
+
+```csharp
+public enum Role
+{
+    User,
+    Assistant
+}
+```
+
+### McpErrorCode
+
+Standard MCP error codes.
+
+```csharp
+public enum McpErrorCode
+{
+    ParseError = -32700,
+    InvalidRequest = -32600,
+    MethodNotFound = -32601,
+    InvalidParams = -32602,
+    InternalError = -32603
+}
+```
+
+## Request and Notification Methods
+
+### RequestMethods
+
+Constants for MCP request method names.
+
+```csharp
+public static class RequestMethods
+{
+    public const string Ping = "ping";
+    public const string ToolsList = "tools/list";
+    public const string ToolsCall = "tools/call";
+    public const string PromptsList = "prompts/list";
+    public const string PromptsGet = "prompts/get";
+    public const string ResourcesList = "resources/list";
+    public const string ResourcesRead = "resources/read";
+    public const string ResourcesTemplatesList = "resources/templates/list";
+    public const string ResourcesSubscribe = "resources/subscribe";
+    public const string ResourcesUnsubscribe = "resources/unsubscribe";
+    // ... and more
+}
+```
+
+### NotificationMethods
+
+Constants for MCP notification method names.
+
+```csharp
+public static class NotificationMethods
+{
+    public const string Cancelled = "notifications/cancelled";
+    public const string Progress = "notifications/progress";
+    public const string ResourceUpdatedNotification = "notifications/resources/updated";
+    public const string ResourceListChangedNotification = "notifications/resources/list_changed";
+    public const string ToolListChangedNotification = "notifications/tools/list_changed";
+    public const string PromptListChangedNotification = "notifications/prompts/list_changed";
+    // ... and more
+}
+```
+
+## See Also
+
+- [McpClient](/api/core/mcp-client) - Client class using these protocol types
+- [MCP Specification Schema](https://github.com/modelcontextprotocol/specification/blob/main/schema/) - Official protocol specification

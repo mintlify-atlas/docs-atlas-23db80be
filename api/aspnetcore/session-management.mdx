@@ -1,0 +1,271 @@
+---
+title: Session Management
+description: Stateful session management and migration in ASP.NET Core MCP servers
+---
+
+The ASP.NET Core package provides robust session management with support for idle timeout, session limits, and cross-instance migration.
+
+## Session Lifecycle
+
+MCP sessions in ASP.NET Core are managed by the `StatefulSessionManager` (internal) and tracked through the `StreamableHttpSession` class.
+
+### Session States
+
+Sessions progress through the following states:
+
+1. **Uninitialized** - Session created but not yet registered with the session manager
+2. **Started** - Session registered and accepting requests
+3. **Disposed** - Session has been terminated and cleaned up
+
+### Session Tracking
+
+The session manager tracks:
+- **Active sessions** - Sessions currently processing requests
+- **Idle sessions** - Sessions with no active requests, subject to timeout
+- **Session references** - Reference counting to prevent premature disposal
+
+## Idle Session Management
+
+The `IdleTrackingBackgroundService` runs every 5 seconds to prune idle sessions based on configured policies.
+
+### Configuration
+
+<ParamField path="IdleTimeout" type="TimeSpan" default="2 hours">
+  Duration to wait between active requests before timing out a session.
+  
+  ```csharp
+  builder.Services.AddMcpServer()
+      .WithHttpTransport(options =>
+      {
+          options.IdleTimeout = TimeSpan.FromMinutes(30);
+      });
+  ```
+</ParamField>
+
+<ParamField path="MaxIdleSessionCount" type="int" default="10000">
+  Maximum number of idle sessions to keep in memory.
+  
+  When exceeded, the oldest idle sessions are terminated even if they haven't reached `IdleTimeout`.
+  
+  ```csharp
+  builder.Services.AddMcpServer()
+      .WithHttpTransport(options =>
+      {
+          options.MaxIdleSessionCount = 5000;
+      });
+  ```
+</ParamField>
+
+### Keeping Sessions Alive
+
+Clients can keep sessions alive by:
+- Maintaining an open GET request to the MCP endpoint
+- Sending periodic requests before the `IdleTimeout` expires
+
+Active sessions with open GET requests don't count toward `MaxIdleSessionCount`.
+
+## Session Migration
+
+The `ISessionMigrationHandler` interface enables session migration across server instances in horizontally scaled deployments.
+
+### ISessionMigrationHandler
+
+```csharp
+public interface ISessionMigrationHandler
+{
+    ValueTask OnSessionInitializedAsync(
+        HttpContext context,
+        string sessionId,
+        InitializeRequestParams initializeParams,
+        CancellationToken cancellationToken);
+
+    ValueTask<InitializeRequestParams?> AllowSessionMigrationAsync(
+        HttpContext context,
+        string sessionId,
+        CancellationToken cancellationToken);
+}
+```
+
+### Methods
+
+<ParamField path="OnSessionInitializedAsync" type="method">
+  Called after a session has been successfully initialized via the MCP initialization handshake.
+  
+  **Parameters:**
+  - `context` - The `HttpContext` for the initialization request
+  - `sessionId` - The unique identifier for the session
+  - `initializeParams` - Initialization parameters from the client (capabilities, client info, protocol version)
+  - `cancellationToken` - Cancellation token
+  
+  Use this to persist the initialization parameters to external storage for later migration.
+</ParamField>
+
+<ParamField path="AllowSessionMigrationAsync" type="method">
+  Called when a request arrives with an MCP-Session-Id that the current server doesn't recognize.
+  
+  **Parameters:**
+  - `context` - The `HttpContext` for the request with unrecognized session ID
+  - `sessionId` - The session ID from the request
+  - `cancellationToken` - Cancellation token
+  
+  **Returns:**
+  - The original `InitializeRequestParams` to allow migration, or `null` to reject (returns 404 to client)
+  
+  <Note>
+    Implementations should validate authorization (e.g., checking `HttpContext.User`) to ensure the caller is permitted to migrate the session.
+  </Note>
+</ParamField>
+
+### Migration Behavior
+
+When a request arrives with a session ID not found locally:
+
+1. The server checks if an `ISessionMigrationHandler` is registered
+2. If registered, calls `AllowSessionMigrationAsync` to retrieve initialization parameters
+3. If parameters are returned, recreates the session on the current instance
+4. If `null` is returned or no handler is registered, returns 404 to the client
+
+<Note>
+  Session migration does **not** solve session-affinity for in-flight server-to-client requests (sampling, elicitation). Responses to those requests must still be routed to the process that created the request. This interface only enables migration of idle sessions.
+</Note>
+
+### Implementation Example
+
+<CodeGroup>
+```csharp Redis-Based Migration
+public class RedisMigrationHandler : ISessionMigrationHandler
+{
+    private readonly IConnectionMultiplexer _redis;
+    private readonly ILogger<RedisMigrationHandler> _logger;
+
+    public RedisMigrationHandler(
+        IConnectionMultiplexer redis,
+        ILogger<RedisMigrationHandler> logger)
+    {
+        _redis = redis;
+        _logger = logger;
+    }
+
+    public async ValueTask OnSessionInitializedAsync(
+        HttpContext context,
+        string sessionId,
+        InitializeRequestParams initializeParams,
+        CancellationToken cancellationToken)
+    {
+        var db = _redis.GetDatabase();
+        var json = JsonSerializer.Serialize(initializeParams);
+        
+        await db.StringSetAsync(
+            $"mcp:session:{sessionId}",
+            json,
+            TimeSpan.FromHours(24));
+        
+        _logger.LogInformation(
+            "Persisted session {SessionId} for migration",
+            sessionId);
+    }
+
+    public async ValueTask<InitializeRequestParams?> AllowSessionMigrationAsync(
+        HttpContext context,
+        string sessionId,
+        CancellationToken cancellationToken)
+    {
+        // Validate authorization
+        if (!context.User.Identity?.IsAuthenticated ?? true)
+        {
+            _logger.LogWarning(
+                "Rejecting migration for session {SessionId}: unauthenticated",
+                sessionId);
+            return null;
+        }
+
+        var db = _redis.GetDatabase();
+        var json = await db.StringGetAsync($"mcp:session:{sessionId}");
+        
+        if (json.IsNullOrEmpty)
+        {
+            _logger.LogWarning(
+                "Session {SessionId} not found in migration store",
+                sessionId);
+            return null;
+        }
+
+        var initParams = JsonSerializer.Deserialize<InitializeRequestParams>(json!);
+        
+        _logger.LogInformation(
+            "Migrated session {SessionId} to this instance",
+            sessionId);
+        
+        return initParams;
+    }
+}
+```
+
+```csharp Registration
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = "localhost:6379";
+});
+
+builder.Services.AddSingleton<ISessionMigrationHandler, RedisMigrationHandler>();
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport();
+```
+</CodeGroup>
+
+## Stateless Mode
+
+For completely stateless operation without session tracking:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.Stateless = true;
+    });
+```
+
+In stateless mode:
+- `McpSession.SessionId` is `null`
+- No "MCP-Session-Id" header is used
+- `RunSessionHandler` is called once per request
+- The "/sse" endpoint is disabled
+- Server-to-client messages and requests are unsupported
+- Perfect for load-balanced environments without session affinity
+
+## Session Cleanup
+
+Sessions are automatically cleaned up:
+
+1. **On idle timeout** - After `IdleTimeout` with no activity
+2. **On capacity limit** - When `MaxIdleSessionCount` is exceeded
+3. **On DELETE request** - Client explicitly terminates session
+4. **On graceful shutdown** - All sessions disposed during app shutdown
+
+### Graceful Shutdown
+
+The `IdleTrackingBackgroundService` ensures all sessions are properly disposed during application shutdown:
+
+```csharp
+protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+{
+    try
+    {
+        // Periodic pruning loop...
+    }
+    finally
+    {
+        await _sessions.DisposeAllSessionsAsync();
+    }
+}
+```
+
+## Best Practices
+
+1. **Set appropriate timeouts** - Balance resource usage with client reconnection patterns
+2. **Monitor idle session count** - Watch for sessions approaching `MaxIdleSessionCount`
+3. **Implement migration for HA** - Use `ISessionMigrationHandler` for high availability scenarios
+4. **Validate migration requests** - Always check authorization in `AllowSessionMigrationAsync`
+5. **Use stateless mode for simple APIs** - If you don't need server-initiated messages
+6. **Keep sessions alive strategically** - Maintain open GET requests only when needed

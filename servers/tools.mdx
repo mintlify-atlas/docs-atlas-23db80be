@@ -1,0 +1,427 @@
+---
+title: Implementing Tools
+description: Build MCP server tools with the [McpServerTool] attribute
+---
+
+Tools are executable functions that MCP servers expose to clients. The C# SDK provides attribute-based tools that automatically handle parameter binding, validation, and result marshalling.
+
+## Basic Tool Implementation
+
+Use the `[McpServerTool]` attribute to mark methods as MCP tools:
+
+```csharp WeatherTools.cs
+using ModelContextProtocol.Server;
+using System.ComponentModel;
+
+[McpServerToolType]
+public sealed class WeatherTools
+{
+    [McpServerTool, Description("Get weather alerts for a US state.")]
+    public static async Task<string> GetAlerts(
+        HttpClient client,
+        [Description("The US state to get alerts for. Use the 2 letter abbreviation for the state (e.g. NY).")] string state)
+    {
+        using var jsonDocument = await client.ReadJsonDocumentAsync($"/alerts/active/area/{state}");
+        var alerts = jsonDocument.RootElement.GetProperty("features").EnumerateArray();
+
+        if (!alerts.Any())
+        {
+            return "No active alerts for this state.";
+        }
+
+        return string.Join("\n--\n", alerts.Select(alert =>
+        {
+            JsonElement properties = alert.GetProperty("properties");
+            return $"""
+                    Event: {properties.GetProperty("event").GetString()}
+                    Area: {properties.GetProperty("areaDesc").GetString()}
+                    Severity: {properties.GetProperty("severity").GetString()}
+                    """;
+        }));
+    }
+}
+```
+
+## Registering Tools
+
+Register tool types with the MCP server builder:
+
+```csharp Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<WeatherTools>();
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+## Tool Attributes
+
+### McpServerToolAttribute Properties
+
+<ParamField path="Name" type="string">
+  The tool's name. If null, the method name is used.
+</ParamField>
+
+<ParamField path="Title" type="string">
+  A human-readable title displayed to users.
+</ParamField>
+
+<ParamField path="IconSource" type="string">
+  URI for the tool's icon (HTTP/HTTPS URL or data URI).
+</ParamField>
+
+<ParamField path="ReadOnly" type="bool" default="false">
+  Indicates the tool doesn't modify its environment.
+</ParamField>
+
+<ParamField path="Destructive" type="bool" default="true">
+  Indicates the tool might perform destructive updates.
+</ParamField>
+
+<ParamField path="Idempotent" type="bool" default="false">
+  Indicates repeated calls with same arguments have no additional effect.
+</ParamField>
+
+<ParamField path="OpenWorld" type="bool" default="true">
+  Indicates the tool can interact with external entities.
+</ParamField>
+
+<ParamField path="UseStructuredContent" type="bool" default="false">
+  Enables structured content output with schema.
+</ParamField>
+
+### Example with Attributes
+
+```csharp
+[McpServerToolType]
+public class AddTool
+{
+    [McpServerTool(
+        Name = "add",
+        IconSource = "https://example.com/plus.svg"
+    )]
+    [Description("Adds two numbers.")]
+    public static string Add(int a, int b) => $"The sum of {a} and {b} is {a + b}";
+}
+```
+
+## Parameter Binding
+
+The SDK automatically binds parameters from various sources:
+
+### From Arguments
+
+Most parameters are deserialized from the `CallToolRequestParams.Arguments` dictionary:
+
+```csharp
+[McpServerTool]
+[Description("Search for items")]
+public static string Search(
+    [Description("Search query")] string query,
+    [Description("Maximum results")] int maxResults = 10)
+{
+    return $"Searching for: {query}, limit: {maxResults}";
+}
+```
+
+### Special Parameter Types
+
+Certain parameter types are automatically bound and excluded from the JSON schema:
+
+<Steps>
+  <Step title="CancellationToken">
+    Bound to a token that respects client cancellation notifications:
+    ```csharp
+    [McpServerTool]
+    public static async Task<string> LongOperation(CancellationToken cancellationToken)
+    {
+        await Task.Delay(5000, cancellationToken);
+        return "Completed";
+    }
+    ```
+  </Step>
+
+  <Step title="McpServer">
+    Access the server instance to send notifications or interact with clients:
+    ```csharp
+    [McpServerTool]
+    public static async Task<string> NotifyUser(McpServer server, string message)
+    {
+        await server.SendNotificationAsync("notifications/message", new
+        {
+            Level = "info",
+            Data = message
+        });
+        return "Notification sent";
+    }
+    ```
+  </Step>
+
+  <Step title="RequestContext<CallToolRequestParams>">
+    Access the full request context including progress tokens:
+    ```csharp
+    [McpServerTool]
+    public static async Task<string> LongRunningOperation(
+        McpServer server,
+        RequestContext<CallToolRequestParams> context,
+        int duration = 10)
+    {
+        var progressToken = context.Params?.ProgressToken;
+        
+        if (progressToken is not null)
+        {
+            await server.SendNotificationAsync("notifications/progress", new
+            {
+                Progress = 1,
+                Total = 10,
+                progressToken
+            });
+        }
+        
+        return "Completed";
+    }
+    ```
+  </Step>
+
+  <Step title="IServiceProvider">
+    Resolve services from dependency injection:
+    ```csharp
+    [McpServerTool]
+    public static string UseService(IServiceProvider services)
+    {
+        var myService = services.GetRequiredService<MyService>();
+        return myService.DoWork();
+    }
+    ```
+  </Step>
+
+  <Step title="HttpClient">
+    When registered in DI, HttpClient is automatically injected:
+    ```csharp
+    [McpServerTool]
+    public static async Task<string> FetchData(HttpClient client)
+    {
+        return await client.GetStringAsync("https://api.example.com/data");
+    }
+    ```
+  </Step>
+</Steps>
+
+## Instance vs Static Methods
+
+### Static Methods
+
+Simple tools can be static methods:
+
+```csharp
+[McpServerToolType]
+public class MathTools
+{
+    [McpServerTool]
+    public static int Multiply(int a, int b) => a * b;
+}
+```
+
+### Instance Methods with Dependency Injection
+
+For tools that need services, use instance methods:
+
+```csharp
+[McpServerToolType]
+public sealed class WeatherTools
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+
+    public WeatherTools(IHttpClientFactory httpClientFactory)
+    {
+        _httpClientFactory = httpClientFactory;
+    }
+
+    [McpServerTool]
+    [Description("Get weather forecast for a location.")]
+    public async Task<string> GetForecast(
+        [Description("Latitude of the location.")] double latitude,
+        [Description("Longitude of the location.")] double longitude)
+    {
+        var client = _httpClientFactory.CreateClient("WeatherApi");
+        // ... implementation
+    }
+}
+```
+
+## Return Types
+
+The SDK automatically converts various return types to `CallToolResult`:
+
+<CodeGroup>
+```csharp String
+[McpServerTool]
+public static string GetMessage() => "Hello, World!";
+// Returns: TextContentBlock with the string
+```
+
+```csharp ContentBlock
+[McpServerTool]
+public static TextContentBlock GetContent()
+{
+    return new TextContentBlock
+    {
+        Text = "Formatted content",
+        Annotations = new() { Priority = 1.0f }
+    };
+}
+```
+
+```csharp Multiple Content Blocks
+[McpServerTool]
+public static IEnumerable<ContentBlock> GetAnnotatedMessage()
+{
+    return [
+        new TextContentBlock
+        {
+            Text = "Operation completed successfully",
+            Annotations = new() { Audience = [Role.User], Priority = 0.7f }
+        },
+        new ImageContentBlock
+        {
+            Data = imageBytes,
+            MimeType = "image/png"
+        }
+    ];
+}
+```
+
+```csharp CallToolResult
+[McpServerTool]
+public static CallToolResult GetResult()
+{
+    return new CallToolResult
+    {
+        Content = [new TextContentBlock { Text = "Success" }],
+        IsError = false
+    };
+}
+```
+</CodeGroup>
+
+## Error Handling
+
+Throw `McpException` to return structured errors to clients:
+
+```csharp
+[McpServerTool]
+public static string ValidateInput(string input)
+{
+    if (string.IsNullOrWhiteSpace(input))
+    {
+        throw new McpException("Input cannot be empty");
+    }
+    
+    return $"Valid input: {input}";
+}
+```
+
+<Warning>
+  Throwing non-McpException exceptions results in generic error messages to avoid leaking sensitive information.
+</Warning>
+
+## Tool Metadata
+
+Add custom metadata to tools using `[McpMeta]`:
+
+```csharp
+[McpServerTool]
+[McpMeta("category", "weather")]
+[McpMeta("dataSource", "weather.gov")]
+[McpMeta("recommendedModel", "gpt-4")]
+[Description("Get weather forecast for a location.")]
+public async Task<string> GetForecast(
+    double latitude,
+    double longitude)
+{
+    // ... implementation
+}
+```
+
+## Advanced Configuration
+
+### Programmatic Tool Creation
+
+Create tools programmatically for advanced scenarios:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithTools([
+        McpServerTool.Create(
+            typeof(EchoTool).GetMethod(nameof(EchoTool.Echo))!,
+            options: new McpServerToolCreateOptions
+            {
+                Icons = [
+                    new Icon
+                    {
+                        Source = "https://example.com/icon.svg",
+                        MimeType = "image/svg+xml",
+                        Sizes = ["any"],
+                        Theme = "light"
+                    },
+                    new Icon
+                    {
+                        Source = "https://example.com/icon-dark.svg",
+                        MimeType = "image/svg+xml",
+                        Sizes = ["any"],
+                        Theme = "dark"
+                    }
+                ]
+            })
+    ]);
+```
+
+### Multiple Registration Methods
+
+```csharp
+// Register by type
+.WithTools<WeatherTools>()
+
+// Register from assembly
+.WithToolsFromAssembly()
+
+// Register from types collection
+.WithTools([typeof(Tool1), typeof(Tool2)])
+
+// Register with custom serializer
+.WithTools<CustomTools>(serializerOptions)
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Write Clear Descriptions">
+    Provide detailed `[Description]` attributes on methods and parameters. AI models use these to determine when and how to use tools.
+  </Step>
+
+  <Step title="Validate Input">
+    Always validate input parameters. The SDK doesn't enforce data annotations at runtime - validation is your responsibility.
+  </Step>
+
+  <Step title="Use Appropriate Return Types">
+    Return simple types like `string` for text responses, or `IEnumerable<ContentBlock>` for structured content.
+  </Step>
+
+  <Step title="Handle Cancellation">
+    Accept `CancellationToken` parameters for long-running operations to respect client cancellations.
+  </Step>
+
+  <Step title="Set Tool Properties">
+    Configure `ReadOnly`, `Destructive`, `Idempotent`, and `OpenWorld` properties appropriately for your tool's behavior.
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Learn about [Resources](/servers/resources) for exposing data
+- Explore [Prompts](/servers/prompts) for pre-built prompt templates
+- Add [Filters](/servers/filters) for cross-cutting concerns

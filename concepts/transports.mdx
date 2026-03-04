@@ -1,0 +1,585 @@
+---
+title: Transports
+description: Transport options (stdio, HTTP, SSE) for MCP communication
+---
+
+# Transports
+
+Transports handle the communication layer between MCP clients and servers. The C# SDK supports three transport mechanisms: **stdio** for local processes, **Streamable HTTP** for modern remote servers, and **SSE** (Server-Sent Events) for legacy compatibility.
+
+## Transport Architecture
+
+All transports implement the core `ITransport` interface:
+
+```csharp
+public interface ITransport : IAsyncDisposable
+{
+    string? SessionId { get; }
+    ChannelReader<JsonRpcMessage> MessageReader { get; }
+    Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default);
+}
+```
+
+**Key concepts:**
+- **MessageReader** - Channel-based message reception for efficient async processing
+- **SendMessageAsync** - Thread-safe message sending
+- **SessionId** - Unique identifier for multi-session transports (HTTP/SSE)
+
+## Stdio Transport
+
+The stdio transport communicates over standard input/output streams, ideal for local integrations where the server runs as a child process.
+
+### Stdio Client
+
+Use `StdioClientTransport` to launch and communicate with a server process:
+
+```csharp
+using ModelContextProtocol.Client;
+
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "node",
+    Arguments = ["server.js"],
+    WorkingDirectory = "/path/to/server",
+    EnvironmentVariables = new Dictionary<string, string?>
+    {
+        ["NODE_ENV"] = "production",
+        ["API_KEY"] = GetApiKey()
+    },
+    ShutdownTimeout = TimeSpan.FromSeconds(10)
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+#### Configuration Options
+
+<Tabs>
+  <Tab title="Basic Options">
+    | Property | Type | Description |
+    |----------|------|-------------|
+    | `Command` | `string` | Executable to launch (required) |
+    | `Arguments` | `IList<string>?` | Command-line arguments |
+    | `WorkingDirectory` | `string?` | Working directory for the process |
+    | `Name` | `string?` | Transport identifier for logging |
+  </Tab>
+  
+  <Tab title="Environment">
+    ```csharp
+    EnvironmentVariables = new Dictionary<string, string?>
+    {
+        ["PATH"] = "/custom/path",  // Override PATH
+        ["DEBUG"] = "true",          // Add variable
+        ["TEMP"] = null              // Remove variable
+    }
+    ```
+    
+    Variables are merged with the current process environment. Set to `null` to remove inherited variables.
+  </Tab>
+  
+  <Tab title="Lifecycle">
+    | Property | Type | Default | Description |
+    |----------|------|---------|-------------|
+    | `ShutdownTimeout` | `TimeSpan` | 5 seconds | Graceful shutdown timeout |
+    | `StandardErrorLines` | `Action<string>?` | - | Callback for stderr output |
+    
+    ```csharp
+    StandardErrorLines = line => 
+    {
+        Console.Error.WriteLine($"[Server] {line}");
+    }
+    ```
+  </Tab>
+</Tabs>
+
+#### Platform-Specific Behavior
+
+<Note>
+**Windows:** Non-shell commands are automatically wrapped with `cmd.exe /c` to ensure proper stdio handling.
+
+```csharp
+// On Windows, this:
+Command = "npx",
+Arguments = ["-y", "@modelcontextprotocol/server-everything"]
+
+// Becomes:
+Command = "cmd.exe",
+Arguments = ["/c", "npx", "-y", "@modelcontextprotocol/server-everything"]
+```
+</Note>
+
+#### Completion Tracking
+
+Monitor process lifecycle:
+
+```csharp
+var client = await McpClient.CreateAsync(transport);
+
+var completion = await client.Completion;
+
+if (completion is StdioClientCompletionDetails stdioCompletion)
+{
+    Console.WriteLine($"Process exited with code: {stdioCompletion.ExitCode}");
+    
+    if (stdioCompletion.ExitCode != 0)
+    {
+        Console.WriteLine($"Error: {stdioCompletion.Exception?.Message}");
+    }
+}
+```
+
+### Stdio Server
+
+Use `StdioServerTransport` for servers that communicate over stdin/stdout:
+
+```csharp
+using Microsoft.Extensions.Hosting;
+using ModelContextProtocol.Server;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+// CRITICAL: Log to stderr, not stdout
+builder.Logging.AddConsole(options =>
+{
+    options.LogToStandardErrorThreshold = LogLevel.Trace;
+});
+
+builder.Services
+    .AddMcpServer()
+    .WithStdioServerTransport()
+    .WithToolsFromAssembly();
+
+await builder.Build().RunAsync();
+```
+
+<Warning>
+**Important:** For stdio servers, all logging MUST go to stderr. Stdout is reserved exclusively for MCP protocol messages. Writing anything else to stdout will corrupt the protocol stream.
+</Warning>
+
+#### Direct Instantiation
+
+For custom scenarios without hosting:
+
+```csharp
+var serverOptions = new McpServerOptions
+{
+    ServerInfo = new Implementation { Name = "MyServer", Version = "1.0.0" }
+};
+
+var transport = new StdioServerTransport(serverOptions, loggerFactory);
+
+// Or with just a name:
+var transport = new StdioServerTransport("MyServer", loggerFactory);
+```
+
+## Streamable HTTP Transport
+
+Streamable HTTP is the recommended transport for remote servers, supporting bidirectional streaming and session resumption.
+
+### Streamable HTTP Client
+
+Connect to HTTP-based servers:
+
+```csharp
+using ModelContextProtocol.Client;
+
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://mcp-server.example.com/mcp"),
+    TransportMode = HttpTransportMode.StreamableHttp,
+    ConnectionTimeout = TimeSpan.FromSeconds(30),
+    AdditionalHeaders = new Dictionary<string, string>
+    {
+        ["Authorization"] = $"Bearer {token}",
+        ["X-Custom-Header"] = "value"
+    }
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+#### Auto-Detection
+
+The client can automatically detect the best transport mode:
+
+```csharp
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://mcp-server.example.com/mcp"),
+    TransportMode = HttpTransportMode.AutoDetect // Default
+});
+```
+
+**Detection logic:**
+1. Tries Streamable HTTP first
+2. Falls back to SSE if server doesn't support Streamable HTTP
+3. Throws if neither is supported
+
+#### Session Resumption
+
+Streamable HTTP supports reconnecting to existing sessions:
+
+```csharp
+// Initial connection
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://mcp-server.example.com/mcp")
+});
+
+var client = await McpClient.CreateAsync(transport);
+
+// Save session information
+string sessionId = client.SessionId!;
+ServerCapabilities capabilities = client.ServerCapabilities;
+Implementation serverInfo = client.ServerInfo;
+
+await client.DisposeAsync();
+
+// Later, resume the session
+var resumeTransport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://mcp-server.example.com/mcp"),
+    KnownSessionId = sessionId
+});
+
+var resumedClient = await McpClient.ResumeSessionAsync(
+    resumeTransport,
+    new ResumeClientSessionOptions
+    {
+        ServerCapabilities = capabilities,
+        ServerInfo = serverInfo
+    });
+
+// Session state is preserved, no re-initialization needed
+```
+
+<Info>
+Session resumption requires protocol version `2025-11-25` or later. The server must support session persistence.
+</Info>
+
+### Streamable HTTP Server (ASP.NET Core)
+
+Host MCP servers over HTTP using ASP.NET Core:
+
+```csharp
+using ModelContextProtocol.Server;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithToolsFromAssembly();
+
+var app = builder.Build();
+
+// Map to root path
+app.MapMcp();
+
+// Or custom path
+app.MapMcp("/mcp");
+
+app.Run();
+```
+
+#### Endpoint Routes
+
+`MapMcp()` creates multiple endpoints:
+
+| Endpoint | Protocol | Description |
+|----------|----------|-------------|
+| `/` or `/mcp` | Streamable HTTP | Main endpoint for modern clients |
+| `/sse` or `/mcp/sse` | SSE | Legacy SSE event stream |
+| `/message` or `/mcp/message` | HTTP POST | Legacy SSE client-to-server messages |
+
+**Client connection URLs:**
+```csharp
+// Streamable HTTP clients
+Endpoint = new Uri("https://host/mcp")
+
+// SSE clients (legacy)
+Endpoint = new Uri("https://host/mcp/sse")
+```
+
+#### Session Management
+
+For stateless HTTP servers, configure session persistence:
+
+```csharp
+builder.Services.AddDistributedMemoryCache(); // Or Redis, SQL Server, etc.
+
+builder.Services.AddMcpServer(options =>
+{
+    options.KnownClientInfo = new Implementation
+    {
+        Name = "StatelessClient",
+        Version = "1.0.0"
+    };
+    options.KnownClientCapabilities = new ClientCapabilities { /* ... */ };
+})
+.WithHttpTransport();
+```
+
+## SSE Transport (Legacy)
+
+Server-Sent Events (SSE) is a legacy transport using unidirectional streaming with a separate POST endpoint for client messages.
+
+<Warning>
+SSE is deprecated. New implementations should use Streamable HTTP. SSE support is maintained for backward compatibility only.
+</Warning>
+
+### SSE Client
+
+Connect using SSE mode:
+
+```csharp
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://mcp-server.example.com/sse"),
+    TransportMode = HttpTransportMode.Sse,
+    MaxReconnectionAttempts = 5,
+    DefaultReconnectionInterval = TimeSpan.FromSeconds(1)
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+#### SSE-Specific Options
+
+| Property | Type | Default | Description |
+|----------|------|---------|-------------|
+| `MaxReconnectionAttempts` | `int` | 5 | Maximum reconnection attempts on disconnect |
+| `DefaultReconnectionInterval` | `TimeSpan` | 1 second | Wait time between reconnection attempts |
+
+**Reconnection behavior:**
+- Automatic reconnection on stream disconnect
+- Exponential backoff not implemented (constant interval)
+- Fails after max attempts exceeded
+
+### SSE Server
+
+SSE is automatically supported by `MapMcp()`:
+
+```csharp
+var app = builder.Build();
+
+app.MapMcp(); // Handles both Streamable HTTP and SSE
+
+// SSE clients connect to /sse endpoint
+```
+
+**How it works:**
+1. Client connects to `/sse` endpoint
+2. Server responds with SSE stream for server→client messages
+3. Client sends messages via POST to `/message` endpoint
+4. Server correlates requests/responses via session ID
+
+## Transport Comparison
+
+### Feature Matrix
+
+| Feature | stdio | Streamable HTTP | SSE (Legacy) |
+|---------|-------|-----------------|-------------|
+| Process model | Child process | Remote HTTP | Remote HTTP |
+| Direction | Bidirectional | Bidirectional | Server→Client stream<br/>Client→Server POST |
+| Streaming | ✓ | ✓ | ✓ (server only) |
+| Session resumption | ✗ | ✓ | ✗ |
+| Multi-session | ✗ | ✓ | ✓ |
+| Authentication | Process-level | HTTP (OAuth, headers, etc.) | HTTP (OAuth, headers, etc.) |
+| Best for | Local tools, CLI apps | Production servers, cloud | Legacy compatibility |
+
+### Performance Characteristics
+
+<Tabs>
+  <Tab title="stdio">
+    **Pros:**
+    - Lowest latency (in-process communication)
+    - No network overhead
+    - Simple deployment (single executable)
+    - Automatic process lifecycle management
+    
+    **Cons:**
+    - Limited to local execution
+    - One client per server instance
+    - Platform-specific process handling
+    - No built-in authentication
+  </Tab>
+  
+  <Tab title="Streamable HTTP">
+    **Pros:**
+    - True bidirectional streaming
+    - Session resumption for reliability
+    - Standard HTTP authentication
+    - Load balancing and scaling
+    - Firewall-friendly
+    
+    **Cons:**
+    - Network latency
+    - Requires HTTP infrastructure
+    - More complex deployment
+  </Tab>
+  
+  <Tab title="SSE (Legacy)">
+    **Pros:**
+    - Wide client compatibility
+    - Built on standard HTTP
+    - Works through proxies
+    
+    **Cons:**
+    - Two separate connections (stream + POST)
+    - No session resumption
+    - Less efficient than Streamable HTTP
+    - Deprecated
+  </Tab>
+</Tabs>
+
+## Custom Transports
+
+Implement custom transports by implementing `ITransport`:
+
+```csharp
+public class CustomTransport : ITransport
+{
+    private readonly Channel<JsonRpcMessage> _messageChannel = Channel.CreateUnbounded<JsonRpcMessage>();
+    
+    public string? SessionId => "custom-session-id";
+    
+    public ChannelReader<JsonRpcMessage> MessageReader => _messageChannel.Reader;
+    
+    public async Task SendMessageAsync(JsonRpcMessage message, CancellationToken cancellationToken = default)
+    {
+        // Serialize and send message over your custom protocol
+        var json = JsonSerializer.Serialize(message, McpJsonUtilities.JsonOptions);
+        await SendToRemoteAsync(json, cancellationToken);
+    }
+    
+    private async Task ReceiveMessagesAsync()
+    {
+        while (true)
+        {
+            var json = await ReceiveFromRemoteAsync();
+            var message = JsonSerializer.Deserialize<JsonRpcMessage>(json, McpJsonUtilities.JsonOptions);
+            await _messageChannel.Writer.WriteAsync(message);
+        }
+    }
+    
+    public async ValueTask DisposeAsync()
+    {
+        _messageChannel.Writer.Complete();
+        // Clean up resources
+    }
+}
+```
+
+<Tip>
+Use `McpJsonUtilities.JsonOptions` for consistent JSON serialization compatible with the MCP protocol.
+</Tip>
+
+## Transport Selection Guide
+
+<Steps>
+  <Step title="Local or Remote?">
+    **Local:** Use stdio for CLIs, desktop apps, and local integrations.
+    
+    **Remote:** Use HTTP-based transports for web services, cloud deployments, and multi-client scenarios.
+  </Step>
+  
+  <Step title="Session Requirements">
+    **Need resumption?** Use Streamable HTTP (protocol version `2025-11-25`+).
+    
+    **Short-lived sessions:** Any transport works.
+  </Step>
+  
+  <Step title="Authentication Needs">
+    **Process-level:** stdio is sufficient.
+    
+    **OAuth/JWT/API keys:** Use HTTP transports with `AdditionalHeaders`.
+  </Step>
+  
+  <Step title="Deployment Environment">
+    **Desktop/CLI:** stdio
+    
+    **Docker/Kubernetes:** Streamable HTTP
+    
+    **Serverless:** Streamable HTTP (stateless with session IDs)
+    
+    **Legacy systems:** SSE for compatibility
+  </Step>
+</Steps>
+
+## Best Practices
+
+<AccordionGroup>
+  <Accordion title="Always configure timeouts">
+    ```csharp
+    // Client initialization timeout
+    new McpClientOptions
+    {
+        InitializationTimeout = TimeSpan.FromSeconds(30)
+    };
+    
+    // HTTP connection timeout
+    new HttpClientTransportOptions
+    {
+        ConnectionTimeout = TimeSpan.FromSeconds(30)
+    };
+    
+    // Stdio shutdown timeout
+    new StdioClientTransportOptions
+    {
+        ShutdownTimeout = TimeSpan.FromSeconds(10)
+    };
+    ```
+  </Accordion>
+  
+  <Accordion title="Handle transport disconnection gracefully">
+    ```csharp
+    var client = await McpClient.CreateAsync(transport);
+    
+    _ = Task.Run(async () =>
+    {
+        var completion = await client.Completion;
+        
+        if (completion.Exception is not null)
+        {
+            logger.LogError(completion.Exception, "Transport disconnected unexpectedly");
+            // Attempt reconnection or cleanup
+        }
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Use AutoDetect for flexible HTTP clients">
+    ```csharp
+    // Works with both Streamable HTTP and SSE servers
+    var transport = new HttpClientTransport(new HttpClientTransportOptions
+    {
+        Endpoint = serverUrl,
+        TransportMode = HttpTransportMode.AutoDetect
+    });
+    ```
+  </Accordion>
+  
+  <Accordion title="Implement proper logging for stdio servers">
+    ```csharp
+    builder.Logging.AddConsole(options =>
+    {
+        // Route ALL logs to stderr for stdio
+        options.LogToStandardErrorThreshold = LogLevel.Trace;
+    });
+    
+    // Also configure other loggers
+    builder.Logging.AddFile("server.log"); // OK - writes to file
+    ```
+  </Accordion>
+</AccordionGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Architecture" icon="sitemap" href="/concepts/architecture">
+    Understand the SDK architecture
+  </Card>
+  <Card title="Capabilities" icon="toggle-on" href="/concepts/capabilities">
+    Configure capability negotiation
+  </Card>
+</CardGroup>

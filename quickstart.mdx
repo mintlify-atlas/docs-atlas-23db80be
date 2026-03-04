@@ -1,80 +1,426 @@
 ---
-title: "Quickstart"
-description: "Start building awesome documentation in minutes"
+title: Quick Start
+description: Build your first MCP client and server in .NET with complete working examples
 ---
 
-## Get started in three steps
+# Quick Start
 
-Get your documentation site running locally and make your first customization.
+This guide walks you through building a complete MCP client and server. You'll create a weather server that exposes tools to get forecasts and alerts, then build a client to call those tools.
 
-### Step 1: Set up your local environment
+## Prerequisites
 
-<AccordionGroup>
-  <Accordion icon="copy" title="Clone your docs locally">
-    During the onboarding process, you created a GitHub repository with your docs content if you didn't already have one. You can find a link to this repository in your [dashboard](https://dashboard.mintlify.com).
-    
-    To clone the repository locally so that you can make and preview changes to your docs, follow the [Cloning a repository](https://docs.github.com/en/repositories/creating-and-managing-repositories/cloning-a-repository) guide in the GitHub docs.
-  </Accordion>
-  <Accordion icon="rectangle-terminal" title="Start the preview server">
-    1. Install the Mintlify CLI: `npm i -g mint`
-    2. Navigate to your docs directory and run: `mint dev`
-    3. Open `http://localhost:3000` to see your docs live!
-    
-    <Tip>Your preview updates automatically as you edit files.</Tip>
-  </Accordion>
-</AccordionGroup>
+- .NET 8.0 SDK or later
+- A code editor (Visual Studio, VS Code, or Rider)
+- Basic familiarity with C# and .NET
 
-### Step 2: Deploy your changes
+## Build an MCP Server
 
-<AccordionGroup>
-  <Accordion icon="github" title="Install our GitHub app">
-    Install the Mintlify GitHub app from your [dashboard](https://dashboard.mintlify.com/settings/organization/github-app).
-    
-    Our GitHub app automatically deploys your changes to your docs site, so you don't need to manage deployments yourself.
-</Accordion>
-<Accordion icon="palette" title="Update your site name and colors">
-    For a first change, let's update the name and colors of your docs site.
+You'll create a stdio-based MCP server that exposes weather tools. This server will run as a separate process that clients can connect to.
 
-    1. Open `docs.json` in your editor.
-    2. Change the `"name"` field to your project name.
-    3. Update the `"colors"` to match your brand.
-    4. Save and see your changes instantly at `http://localhost:3000`.
+### Step 1: Create a New Project
 
-    <Tip>Try changing the primary color to see an immediate difference!</Tip>
-  </Accordion>
-</AccordionGroup>
+<Steps>
+  <Step title="Create a console application">
+    ```bash
+    dotnet new console -n WeatherServer
+    cd WeatherServer
+    ```
+  </Step>
 
-### Step 3: Go live
+  <Step title="Add required packages">
+    ```bash
+    dotnet add package ModelContextProtocol
+    dotnet add package Microsoft.Extensions.Hosting
+    ```
+  </Step>
+</Steps>
 
-<Accordion icon="rocket" title="Publish your docs">
-  1. Commit and push your changes.
-  2. Your docs will update and be live in moments!
-</Accordion>
+### Step 2: Configure the Server
 
-## Next steps
+Replace the contents of `Program.cs` with this code:
 
-Now that you have your docs running, explore these key features:
+```csharp Program.cs
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using WeatherServer.Tools;
+using System.Net.Http.Headers;
 
-<CardGroup cols={2}>
+var builder = Host.CreateApplicationBuilder(args);
 
-<Card title="Write Content" icon="pen-to-square" href="/essentials/markdown">
-  Learn MDX syntax and start writing your documentation.
-</Card>
+builder.Services.AddMcpServer()
+    .WithStdioServerTransport()
+    .WithTools<WeatherTools>();
 
-<Card title="Customize style" icon="palette" href="/essentials/settings">
-  Make your docs match your brand perfectly.
-</Card>
+builder.Logging.AddConsole(options =>
+{
+    options.LogToStandardErrorThreshold = LogLevel.Trace;
+});
 
-<Card title="Add code examples" icon="square-code" href="/essentials/code">
-  Include syntax-highlighted code blocks.
-</Card>
+using var httpClient = new HttpClient { BaseAddress = new Uri("https://api.weather.gov") };
+httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("weather-tool", "1.0"));
+builder.Services.AddSingleton(httpClient);
 
-<Card title="API documentation" icon="code" href="/api-reference/introduction">
-  Auto-generate API docs from OpenAPI specs.
-</Card>
-
-</CardGroup>
+await builder.Build().RunAsync();
+```
 
 <Note>
-  **Need help?** See our [full documentation](https://mintlify.com/docs) or join our [community](https://mintlify.com/community).
+  The `LogToStandardErrorThreshold` setting ensures all logs go to stderr, keeping stdout clear for MCP protocol messages.
 </Note>
+
+### Step 3: Create Weather Tools
+
+Create a new directory called `Tools` and add `WeatherTools.cs`:
+
+```csharp Tools/WeatherTools.cs
+using ModelContextProtocol;
+using ModelContextProtocol.Server;
+using System.ComponentModel;
+using System.Globalization;
+using System.Text.Json;
+
+namespace WeatherServer.Tools;
+
+[McpServerToolType]
+public sealed class WeatherTools
+{
+    [McpServerTool, Description("Get weather alerts for a US state.")]
+    public static async Task<string> GetAlerts(
+        HttpClient client,
+        [Description("The US state to get alerts for. Use the 2 letter abbreviation for the state (e.g. NY).")] string state)
+    {
+        using var jsonDocument = await client.ReadJsonDocumentAsync($"/alerts/active/area/{state}");
+        var jsonElement = jsonDocument.RootElement;
+        var alerts = jsonElement.GetProperty("features").EnumerateArray();
+
+        if (!alerts.Any())
+        {
+            return "No active alerts for this state.";
+        }
+
+        return string.Join("\n--\n", alerts.Select(alert =>
+        {
+            JsonElement properties = alert.GetProperty("properties");
+            return $"""
+                    Event: {properties.GetProperty("event").GetString()}
+                    Area: {properties.GetProperty("areaDesc").GetString()}
+                    Severity: {properties.GetProperty("severity").GetString()}
+                    Description: {properties.GetProperty("description").GetString()}
+                    Instruction: {properties.GetProperty("instruction").GetString()}
+                    """;
+        }));
+    }
+
+    [McpServerTool, Description("Get weather forecast for a location.")]
+    public static async Task<string> GetForecast(
+        HttpClient client,
+        [Description("Latitude of the location.")] double latitude,
+        [Description("Longitude of the location.")] double longitude)
+    {
+        var pointUrl = string.Create(CultureInfo.InvariantCulture, $"/points/{latitude},{longitude}");
+        using var locationDocument = await client.ReadJsonDocumentAsync(pointUrl);
+        var forecastUrl = locationDocument.RootElement.GetProperty("properties").GetProperty("forecast").GetString()
+            ?? throw new McpException($"No forecast URL provided by {client.BaseAddress}points/{latitude},{longitude}");
+
+        using var forecastDocument = await client.ReadJsonDocumentAsync(forecastUrl);
+        var periods = forecastDocument.RootElement.GetProperty("properties").GetProperty("periods").EnumerateArray();
+
+        return string.Join("\n---\n", periods.Select(period => $"""
+                {period.GetProperty("name").GetString()}
+                Temperature: {period.GetProperty("temperature").GetInt32()}°F
+                Wind: {period.GetProperty("windSpeed").GetString()} {period.GetProperty("windDirection").GetString()}
+                Forecast: {period.GetProperty("detailedForecast").GetString()}
+                """));
+    }
+}
+```
+
+### How It Works
+
+<Steps>
+  <Step title="Attribute-based discovery">
+    The `[McpServerToolType]` attribute marks the class containing tools, and `[McpServerTool]` marks each method as an exposed tool.
+  </Step>
+
+  <Step title="Dependency injection">
+    The `HttpClient` parameter is automatically injected from the service container when tools are called.
+  </Step>
+
+  <Step title="Description attributes">
+    The `Description` attribute provides documentation for tools and parameters, helping LLMs understand how to use them.
+  </Step>
+</Steps>
+
+### Step 4: Run the Server
+
+```bash
+dotnet run
+```
+
+Your server is now running and ready to accept connections over stdio!
+
+## Build an MCP Client
+
+Now you'll create a client that connects to your weather server and calls its tools.
+
+### Step 1: Create a Client Project
+
+<Steps>
+  <Step title="Create a new console application">
+    ```bash
+    dotnet new console -n WeatherClient
+    cd WeatherClient
+    ```
+  </Step>
+
+  <Step title="Add the required package">
+    ```bash
+    dotnet add package ModelContextProtocol
+    ```
+  </Step>
+</Steps>
+
+### Step 2: Create the Client
+
+Replace `Program.cs` with this code:
+
+```csharp Program.cs
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+
+// Create transport to connect to the server
+var clientTransport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Name = "Weather Server",
+    Command = "dotnet",
+    Arguments = ["run", "--project", "../WeatherServer"],
+});
+
+// Create and initialize the client
+var client = await McpClient.CreateAsync(clientTransport);
+
+Console.WriteLine("Connected to Weather Server\n");
+
+// List available tools
+Console.WriteLine("Available tools:");
+foreach (var tool in await client.ListToolsAsync())
+{
+    Console.WriteLine($"  - {tool.Name}: {tool.Description}");
+}
+
+Console.WriteLine();
+
+// Call the GetForecast tool
+Console.WriteLine("Getting forecast for San Francisco (37.7749, -122.4194)...");
+var forecastResult = await client.CallToolAsync(
+    "GetForecast",
+    new Dictionary<string, object?>()
+    {
+        ["latitude"] = 37.7749,
+        ["longitude"] = -122.4194
+    },
+    cancellationToken: CancellationToken.None);
+
+// Display the forecast
+foreach (var content in forecastResult.Content.OfType<TextContentBlock>())
+{
+    Console.WriteLine(content.Text);
+}
+
+Console.WriteLine();
+
+// Call the GetAlerts tool
+Console.WriteLine("Getting alerts for California...");
+var alertsResult = await client.CallToolAsync(
+    "GetAlerts",
+    new Dictionary<string, object?>() { ["state"] = "CA" },
+    cancellationToken: CancellationToken.None);
+
+// Display the alerts
+foreach (var content in alertsResult.Content.OfType<TextContentBlock>())
+{
+    Console.WriteLine(content.Text);
+}
+```
+
+### How It Works
+
+<Steps>
+  <Step title="Create a transport">
+    `StdioClientTransport` launches the server as a child process and communicates over stdin/stdout.
+  </Step>
+
+  <Step title="Initialize the client">
+    `McpClient.CreateAsync()` establishes the connection and performs the initialization handshake.
+  </Step>
+
+  <Step title="List tools">
+    `ListToolsAsync()` retrieves all tools exposed by the server, including their names and descriptions.
+  </Step>
+
+  <Step title="Call tools">
+    `CallToolAsync()` invokes a tool with parameters and returns the result as content blocks.
+  </Step>
+</Steps>
+
+### Step 3: Run the Client
+
+```bash
+dotnet run
+```
+
+You should see output similar to:
+
+```
+Connected to Weather Server
+
+Available tools:
+  - GetForecast: Get weather forecast for a location.
+  - GetAlerts: Get weather alerts for a US state.
+
+Getting forecast for San Francisco (37.7749, -122.4194)...
+Tonight
+Temperature: 54°F
+Wind: 5 to 10 mph W
+Forecast: Partly cloudy, with a low around 54...
+
+---
+
+Tuesday
+Temperature: 68°F
+Wind: 5 to 10 mph W
+Forecast: Sunny, with a high near 68...
+```
+
+## Using Tools with an LLM
+
+MCP tools inherit from `AIFunction` and work seamlessly with any `IChatClient` implementation from Microsoft.Extensions.AI:
+
+```csharp
+using Microsoft.Extensions.AI;
+
+// Get available tools from the MCP server
+IList<McpClientTool> tools = await client.ListToolsAsync();
+
+// Create your chat client (OpenAI, Anthropic, etc.)
+IChatClient chatClient = ...;
+
+// Use the tools with the chat client
+var response = await chatClient.GetResponseAsync(
+    "What's the weather forecast for Seattle?",
+    new ChatOptions { Tools = [.. tools] });
+
+Console.WriteLine(response.Message.Text);
+```
+
+The chat client will automatically invoke the appropriate MCP tools based on the user's query.
+
+## Build an HTTP Server (Optional)
+
+For HTTP-based MCP servers, use the `ModelContextProtocol.AspNetCore` package:
+
+<Steps>
+  <Step title="Create a web project">
+    ```bash
+    dotnet new web -n WeatherServerHttp
+    cd WeatherServerHttp
+    ```
+  </Step>
+
+  <Step title="Add the package">
+    ```bash
+    dotnet add package ModelContextProtocol.AspNetCore
+    ```
+  </Step>
+
+  <Step title="Configure the server">
+    ```csharp Program.cs
+    using ModelContextProtocol.Server;
+    using System.ComponentModel;
+
+    var builder = WebApplication.CreateBuilder(args);
+    builder.Services.AddMcpServer()
+        .WithHttpTransport()
+        .WithToolsFromAssembly();
+    
+    var app = builder.Build();
+    app.MapMcp();
+    app.Run("http://localhost:3001");
+
+    [McpServerToolType]
+    public static class EchoTool
+    {
+        [McpServerTool, Description("Echoes the message back to the client.")]
+        public static string Echo(string message) => $"hello {message}";
+    }
+    ```
+  </Step>
+
+  <Step title="Connect from a client">
+    ```csharp
+    var clientTransport = new HttpClientTransport(new()
+    {
+        Endpoint = new Uri("http://localhost:3001")
+    });
+    var client = await McpClient.CreateAsync(clientTransport);
+    ```
+  </Step>
+</Steps>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Browse Samples" icon="folder-open" href="https://github.com/modelcontextprotocol/csharp-sdk/tree/main/samples">
+    Explore complete example projects including file servers, long-running tasks, and more
+  </Card>
+  
+  <Card title="API Reference" icon="book" href="https://modelcontextprotocol.github.io/csharp-sdk/api/ModelContextProtocol.html">
+    Dive deep into the SDK's API documentation
+  </Card>
+  
+  <Card title="MCP Specification" icon="file-lines" href="https://modelcontextprotocol.io/specification/">
+    Learn about the Model Context Protocol specification
+  </Card>
+  
+  <Card title="Project Template" icon="wand-magic-sparkles" href="https://learn.microsoft.com/dotnet/ai/quickstarts/build-mcp-server">
+    Use the official MCP Server project template for faster scaffolding
+  </Card>
+</CardGroup>
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="Server doesn't start or crashes immediately">
+    Make sure you're logging to stderr in your server configuration:
+    
+    ```csharp
+    builder.Logging.AddConsole(options =>
+    {
+        options.LogToStandardErrorThreshold = LogLevel.Trace;
+    });
+    ```
+    
+    MCP uses stdout for protocol messages, so all application logs must go to stderr.
+  </Accordion>
+
+  <Accordion title="Client can't connect to server">
+    Verify that:
+    - The server path in `Command` and `Arguments` is correct
+    - The server project builds successfully with `dotnet build`
+    - You can run the server manually with `dotnet run`
+  </Accordion>
+
+  <Accordion title="Tools are not discovered">
+    Ensure that:
+    - Your tool class has the `[McpServerToolType]` attribute
+    - Each tool method has the `[McpServerTool]` attribute
+    - You've called `WithToolsFromAssembly()` or `WithTools<T>()` during server setup
+  </Accordion>
+
+  <Accordion title="HTTP transport errors">
+    For HTTP servers:
+    - Make sure the server is running before the client connects
+    - Verify the endpoint URL matches exactly (including port number)
+    - Check that no firewall is blocking the connection
+  </Accordion>
+</AccordionGroup>

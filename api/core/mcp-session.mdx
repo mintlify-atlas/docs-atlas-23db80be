@@ -1,0 +1,206 @@
+---
+title: McpSession Class
+description: API reference for the McpSession class in ModelContextProtocol namespace
+---
+
+The `McpSession` class represents a client or server Model Context Protocol (MCP) session, providing core communication functionality.
+
+## Namespace
+
+```csharp
+ModelContextProtocol
+```
+
+## Inheritance
+
+`McpSession` → `IAsyncDisposable`
+
+## Overview
+
+The `McpSession` class serves as the base class for both `McpClient` and `McpServer`, providing the common functionality needed for MCP protocol communication:
+
+- Sending JSON-RPC requests and receiving responses
+- Sending notifications to the connected session
+- Registering handlers for receiving notifications
+
+Most applications will use the more specific `McpClient` or `McpServer` classes rather than working with `McpSession` directly.
+
+## Properties
+
+### SessionId
+
+Gets an identifier associated with the current MCP session.
+
+```csharp
+public abstract string? SessionId { get; }
+```
+
+**Remarks:** Typically populated in transports supporting multiple sessions, such as Streamable HTTP or SSE. Can return `null` if the session hasn't initialized or if the transport doesn't support multiple sessions (as is the case with STDIO).
+
+### NegotiatedProtocolVersion
+
+Gets the negotiated protocol version for the current MCP session.
+
+```csharp
+public abstract string? NegotiatedProtocolVersion { get; }
+```
+
+**Remarks:** Returns the protocol version negotiated during session initialization, or `null` if initialization hasn't yet occurred.
+
+## Methods
+
+### SendRequestAsync
+
+Sends a JSON-RPC request to the connected session and waits for a response.
+
+```csharp
+public abstract Task<JsonRpcResponse> SendRequestAsync(
+    JsonRpcRequest request,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="request" type="JsonRpcRequest" required>
+  The JSON-RPC request to send.
+</ParamField>
+
+<ParamField path="cancellationToken" type="CancellationToken">
+  The cancellation token to monitor for cancellation requests.
+</ParamField>
+
+**Returns:** A task containing the session's response.
+
+**Exceptions:**
+- `InvalidOperationException`: The transport is not connected, or another error occurred during request processing.
+- `McpException`: An error occurred during request processing.
+
+**Remarks:** This method provides low-level access to send raw JSON-RPC requests. For most use cases, consider using the strongly-typed methods that provide a more convenient API.
+
+### SendMessageAsync
+
+Sends a JSON-RPC message to the connected session.
+
+```csharp
+public abstract Task SendMessageAsync(
+    JsonRpcMessage message,
+    CancellationToken cancellationToken = default)
+```
+
+<ParamField path="message" type="JsonRpcMessage" required>
+  The JSON-RPC message to send. This can be any type that implements JsonRpcMessage, such as JsonRpcRequest, JsonRpcResponse, JsonRpcNotification, or JsonRpcError.
+</ParamField>
+
+<ParamField path="cancellationToken" type="CancellationToken">
+  The cancellation token to monitor for cancellation requests.
+</ParamField>
+
+**Exceptions:**
+- `InvalidOperationException`: The transport is not connected.
+- `ArgumentNullException`: `message` is null.
+
+**Remarks:** This method provides low-level access to send any JSON-RPC message. For specific message types, consider using the higher-level methods.
+
+### RegisterNotificationHandler
+
+Registers a handler to be invoked when a notification for the specified method is received.
+
+```csharp
+public abstract IAsyncDisposable RegisterNotificationHandler(
+    string method,
+    Func<JsonRpcNotification, CancellationToken, ValueTask> handler)
+```
+
+<ParamField path="method" type="string" required>
+  The notification method.
+</ParamField>
+
+<ParamField path="handler" type="Func<JsonRpcNotification, CancellationToken, ValueTask>" required>
+  The handler to be invoked.
+</ParamField>
+
+**Returns:** An `IAsyncDisposable` that will remove the registered handler when disposed.
+
+**Exceptions:**
+- `ArgumentNullException`: `method` or `handler` is null.
+- `ArgumentException`: `method` is empty or composed entirely of whitespace.
+
+```csharp Example
+await using var registration = session.RegisterNotificationHandler(
+    "notifications/resources/updated",
+    async (notification, ct) =>
+    {
+        // Handle notification
+        var params = JsonSerializer.Deserialize<ResourceUpdatedNotificationParams>(
+            notification.Params,
+            McpJsonUtilities.JsonContext.Default.ResourceUpdatedNotificationParams);
+        
+        Console.WriteLine($"Resource updated: {params?.Uri}");
+    });
+
+// Handler is automatically unregistered when leaving scope
+```
+
+### DisposeAsync
+
+Disposes the session asynchronously.
+
+```csharp
+public abstract ValueTask DisposeAsync()
+```
+
+**Remarks:** All MCP sessions should be properly disposed after use. This ensures that connections are closed gracefully and resources are released.
+
+```csharp Example
+// Using await using for automatic disposal
+await using var session = await McpClient.CreateAsync(transport);
+
+// Session is automatically disposed when leaving scope
+```
+
+## Usage Guidelines
+
+### Proper Disposal
+
+Always dispose of MCP sessions to ensure proper cleanup:
+
+<CodeGroup>
+```csharp Using await using (Recommended)
+await using var client = await McpClient.CreateAsync(transport);
+// Use client
+// Automatically disposed at end of scope
+```
+
+```csharp Manual Disposal
+var client = await McpClient.CreateAsync(transport);
+try
+{
+    // Use client
+}
+finally
+{
+    await client.DisposeAsync();
+}
+```
+</CodeGroup>
+
+### Notification Handlers
+
+When registering notification handlers, ensure they are properly disposed:
+
+```csharp
+await using var client = await McpClient.CreateAsync(transport);
+
+await using var handler = client.RegisterNotificationHandler(
+    "custom/notification",
+    async (notification, ct) =>
+    {
+        // Process notification
+    });
+
+// Both handler and client are disposed automatically
+```
+
+## See Also
+
+- [McpClient](/api/core/mcp-client) - Client implementation extending McpSession
+- [Protocol Types](/api/core/protocol-types) - MCP protocol types and messages
+- [Transports](/api/core/transports) - Transport implementations

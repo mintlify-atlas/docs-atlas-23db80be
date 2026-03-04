@@ -1,0 +1,331 @@
+---
+title: Sampling
+description: Handle server sampling requests to enable agentic tool behavior
+---
+
+Sampling allows MCP servers to request LLM completions from the client. This enables agentic behaviors where server-side tools delegate reasoning back to the client's language model.
+
+## How Sampling Works
+
+<Steps>
+  <Step title="Server requests completion">
+    The server calls `SampleAsync()` during tool execution
+  </Step>
+  <Step title="Request sent to client">
+    The sampling request is sent over the MCP protocol
+  </Step>
+  <Step title="Client handler invoked">
+    The client's `SamplingHandler` processes the request
+  </Step>
+  <Step title="LLM generates response">
+    The handler forwards to an LLM and returns the result
+  </Step>
+  <Step title="Server continues">
+    The server receives the completion and continues execution
+  </Step>
+</Steps>
+
+## Configuring the Client
+
+Set up a sampling handler when creating the client:
+
+### Using IChatClient (Recommended)
+
+The simplest approach uses `CreateSamplingHandler()` with any `IChatClient` implementation:
+
+```csharp
+using Microsoft.Extensions.AI;
+using ModelContextProtocol.Client;
+using OpenAI;
+
+// Create an LLM client for sampling
+IChatClient samplingClient = new OpenAIClient(apiKey)
+    .AsChatClient("gpt-4o-mini")
+    .AsBuilder()
+    .Build();
+
+// Configure sampling handler
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        SamplingHandler = samplingClient.CreateSamplingHandler()
+    }
+};
+
+await using var client = await McpClient.CreateAsync(transport, options);
+```
+
+### Multiple Providers
+
+<CodeGroup>
+
+```csharp OpenAI
+using OpenAI;
+
+var samplingClient = new OpenAIClient(apiKey)
+    .AsChatClient("gpt-4o-mini");
+
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        SamplingHandler = samplingClient.CreateSamplingHandler()
+    }
+};
+```
+
+```csharp Anthropic
+using Anthropic;
+
+var samplingClient = new AnthropicClient(apiKey)
+    .AsChatClient("claude-haiku-4-5-20251001");
+
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        SamplingHandler = samplingClient.CreateSamplingHandler()
+    }
+};
+```
+
+```csharp Ollama
+using OllamaSharp;
+
+var samplingClient = new OllamaChatClient(
+    new Uri("http://localhost:11434"),
+    "llama3"
+);
+
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        SamplingHandler = samplingClient.CreateSamplingHandler()
+    }
+};
+```
+
+</CodeGroup>
+
+### Custom Sampling Handler
+
+For full control, implement a custom handler:
+
+```csharp
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        SamplingHandler = async (request, progress, cancellationToken) =>
+        {
+            // Extract the prompt
+            string prompt = request?.Messages?.LastOrDefault()?.Content
+                .OfType<TextContentBlock>()
+                .FirstOrDefault()?.Text ?? string.Empty;
+
+            // Call your LLM service
+            string response = await MyLLMService.GenerateAsync(
+                prompt,
+                maxTokens: request?.MaxTokens ?? 1000,
+                temperature: request?.Temperature ?? 1.0f,
+                cancellationToken
+            );
+
+            // Return MCP result
+            return new CreateMessageResult
+            {
+                Model = "my-model",
+                Role = Role.Assistant,
+                Content = [new TextContentBlock { Text = response }],
+                StopReason = CreateMessageResult.StopReasonEndTurn
+            };
+        }
+    }
+};
+
+await using var client = await McpClient.CreateAsync(transport, options);
+```
+
+## Complete Example
+
+Here's a complete example using sampling with an MCP server:
+
+```csharp
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Client;
+using OpenAI;
+
+using var loggerFactory = LoggerFactory.Create(builder => 
+    builder.AddConsole()
+);
+
+// Create sampling client (for server to use)
+using IChatClient samplingClient = new OpenAIClient(
+    Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+)
+.AsChatClient("gpt-4o-mini")
+.AsBuilder()
+.Build();
+
+// Connect to MCP server with sampling capability
+var mcpClient = await McpClient.CreateAsync(
+    new StdioClientTransport(new()
+    {
+        Command = "npx",
+        Arguments = ["-y", "@modelcontextprotocol/server-everything"],
+        Name = "Everything"
+    }),
+    clientOptions: new()
+    {
+        Handlers = new()
+        {
+            SamplingHandler = samplingClient.CreateSamplingHandler()
+        }
+    },
+    loggerFactory: loggerFactory
+);
+
+// Get available tools
+var tools = await mcpClient.ListToolsAsync();
+Console.WriteLine($"Tools: {string.Join(", ", tools.Select(t => t.Name))}");
+
+// Create main chat client (for user interaction)
+using IChatClient chatClient = new OpenAIClient(
+    Environment.GetEnvironmentVariable("OPENAI_API_KEY")
+)
+.AsChatClient("gpt-4o")
+.AsBuilder()
+.UseFunctionInvocation()
+.Build();
+
+// Chat loop
+List<ChatMessage> messages = [];
+while (true)
+{
+    Console.Write("Q: ");
+    var input = Console.ReadLine();
+    if (string.IsNullOrWhiteSpace(input)) break;
+
+    messages.Add(new(ChatRole.User, input));
+
+    // The chat client calls tools, which may trigger sampling
+    var response = await chatClient.GetResponseAsync(
+        messages,
+        new ChatOptions { Tools = [.. tools] }
+    );
+
+    Console.WriteLine($"A: {response.Message}");
+    messages.Add(response.Message);
+}
+```
+
+## Sampling with Progress
+
+Monitor sampling progress using the progress parameter:
+
+```csharp
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        SamplingHandler = async (request, progress, cancellationToken) =>
+        {
+            var chatOptions = new ChatOptions
+            {
+                MaxOutputTokens = request?.MaxTokens,
+                Temperature = request?.Temperature
+            };
+
+            var updates = new List<ChatResponseUpdate>();
+            await foreach (var update in chatClient.GetStreamingResponseAsync(
+                ConvertToMessages(request),
+                chatOptions,
+                cancellationToken
+            ))
+            {
+                updates.Add(update);
+                
+                // Report progress if requested
+                if (request?.ProgressToken is not null)
+                {
+                    progress.Report(new ProgressNotificationValue
+                    {
+                        Progress = updates.Count
+                    });
+                }
+            }
+
+            return ConvertToResult(updates);
+        }
+    }
+};
+```
+
+## Server-Side Usage
+
+Servers request sampling during tool execution. Server-side sampling is performed by calling the `SampleAsync()` method on the `McpServer` instance.
+
+## Capability Negotiation
+
+When a `SamplingHandler` is configured, the client automatically advertises the `sampling` capability during initialization:
+
+```csharp
+// Capability is advertised automatically
+var options = new McpClientOptions
+{
+    Handlers = new()
+    {
+        SamplingHandler = chatClient.CreateSamplingHandler()
+    }
+    // No need to manually set Capabilities.Sampling
+};
+```
+
+Servers can check if sampling is supported before calling `SampleAsync()`. If not supported, the method throws `InvalidOperationException`.
+
+## Use Cases
+
+Sampling enables powerful agentic behaviors:
+
+<CardGroup cols={2}>
+  <Card title="Content Summarization" icon="compress">
+    Server tools can ask the LLM to summarize large documents or API responses
+  </Card>
+  <Card title="Decision Making" icon="scale-balanced">
+    Tools can delegate complex decisions to the LLM during execution
+  </Card>
+  <Card title="Code Generation" icon="code">
+    Server can request code snippets or transformations from the LLM
+  </Card>
+  <Card title="Data Analysis" icon="chart-line">
+    Tools can ask the LLM to analyze and interpret data
+  </Card>
+</CardGroup>
+
+## Best Practices
+
+<Tip>
+**Use appropriate models**: Use faster, cheaper models (like GPT-4o-mini or Claude Haiku) for sampling to keep costs down.
+</Tip>
+
+<Warning>
+**Avoid infinite loops**: Be careful not to create circular dependencies where the sampling LLM calls tools that trigger more sampling.
+</Warning>
+
+<Note>
+**Progress reporting**: Implement progress reporting for long-running sampling requests to provide feedback to users.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Roots" icon="folder-tree" href="/clients/roots">
+    Provide filesystem roots to servers
+  </Card>
+  <Card title="Elicitation" icon="circle-question" href="/clients/elicitation">
+    Handle URL elicitation requests
+  </Card>
+</CardGroup>

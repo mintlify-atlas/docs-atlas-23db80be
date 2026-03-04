@@ -1,0 +1,337 @@
+---
+title: Pagination
+description: Handle large result sets with cursor-based pagination
+---
+
+MCP uses [cursor-based pagination](https://modelcontextprotocol.io/specification/2025-11-25/server/utilities/pagination) for all list operations that may return large result sets. The MCP C# SDK provides both convenience methods for automatic pagination and raw methods for manual control.
+
+## Overview
+
+Instead of offset-based pagination (page 1, page 2, etc.), MCP uses **opaque cursor tokens**. Each paginated response may include a `NextCursor` value. If present, pass it in the next request to retrieve the next page of results.
+
+<Note>
+  The cursor format is completely opaque to clients. Servers can use any encoding scheme (numeric offsets, base64 tokens, database cursors, etc.) as long as they can parse their own cursors.
+</Note>
+
+## Client-Side Pagination
+
+The MCP C# SDK provides two levels of API for working with paginated results:
+
+### Automatic Pagination (Recommended)
+
+Convenience methods automatically fetch all pages and return the complete list:
+
+```csharp
+// Fetches all tools, handling pagination automatically
+IList<McpClientTool> allTools = await client.ListToolsAsync();
+
+// Fetches all resources
+IList<McpClientResource> allResources = await client.ListResourcesAsync();
+
+// Fetches all prompts
+IList<McpClientPrompt> allPrompts = await client.ListPromptsAsync();
+
+// Fetches all resource templates
+IList<McpClientResourceTemplate> allTemplates = await client.ListResourceTemplatesAsync();
+```
+
+These methods:
+- Automatically handle pagination internally
+- Make multiple requests as needed
+- Return all results in a single collection
+- Are suitable for most use cases
+
+### Manual Pagination
+
+For more control (processing page-by-page, limiting results, showing progress), use the raw methods:
+
+```csharp
+string? cursor = null;
+int pageCount = 0;
+
+do
+{
+    var result = await client.ListToolsAsync(new ListToolsRequestParams
+    {
+        Cursor = cursor
+    });
+
+    pageCount++;
+    Console.WriteLine($"Page {pageCount}: {result.Tools.Count} tools");
+
+    // Process this page of results
+    foreach (var tool in result.Tools)
+    {
+        Console.WriteLine($"  {tool.Name}: {tool.Description}");
+    }
+
+    // Get the cursor for the next page (null when no more pages)
+    cursor = result.NextCursor;
+
+} while (cursor is not null);
+
+Console.WriteLine($"Total pages: {pageCount}");
+```
+
+### Processing with Limits
+
+Stop after a certain number of results:
+
+```csharp
+string? cursor = null;
+int totalProcessed = 0;
+const int maxResults = 50;
+
+do
+{
+    var result = await client.ListResourcesAsync(new ListResourcesRequestParams
+    {
+        Cursor = cursor
+    });
+
+    foreach (var resource in result.Resources)
+    {
+        ProcessResource(resource);
+        totalProcessed++;
+
+        if (totalProcessed >= maxResults)
+        {
+            break;
+        }
+    }
+
+    cursor = result.NextCursor;
+
+} while (cursor is not null && totalProcessed < maxResults);
+```
+
+## Server-Side Pagination
+
+When implementing custom list handlers on the server, support pagination by:
+
+1. Reading the `Cursor` property from request parameters
+2. Returning a `NextCursor` in the result when more pages exist
+
+### Basic Server Implementation
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithListResourcesHandler(async (ctx, ct) =>
+    {
+        const int pageSize = 10;
+        int startIndex = 0;
+
+        // Parse cursor to determine starting position
+        if (ctx.Params?.Cursor is { } cursor)
+        {
+            startIndex = int.Parse(cursor);
+        }
+
+        var allResources = GetAllResources();
+        var page = allResources.Skip(startIndex).Take(pageSize).ToList();
+        var hasMore = startIndex + pageSize < allResources.Count;
+
+        return new ListResourcesResult
+        {
+            Resources = page,
+            NextCursor = hasMore ? (startIndex + pageSize).ToString() : null
+        };
+    });
+```
+
+### Database Pagination Example
+
+Using Entity Framework with keyset pagination:
+
+```csharp
+.WithListToolsHandler(async (ctx, ct) =>
+{
+    const int pageSize = 20;
+    int? lastId = null;
+
+    // Parse cursor as the last ID from the previous page
+    if (ctx.Params?.Cursor is { } cursor)
+    {
+        lastId = int.Parse(cursor);
+    }
+
+    var query = dbContext.Tools
+        .OrderBy(t => t.Id)
+        .AsQueryable();
+
+    if (lastId.HasValue)
+    {
+        query = query.Where(t => t.Id > lastId.Value);
+    }
+
+    var tools = await query
+        .Take(pageSize + 1)  // Fetch one extra to check if more exist
+        .ToListAsync(ct);
+
+    var hasMore = tools.Count > pageSize;
+    if (hasMore)
+    {
+        tools.RemoveAt(tools.Count - 1);  // Remove the extra item
+    }
+
+    return new ListToolsResult
+    {
+        Tools = tools.Select(MapToMcpTool).ToList(),
+        NextCursor = hasMore ? tools[^1].Id.ToString() : null
+    };
+});
+```
+
+### Opaque Token Pagination
+
+Using base64-encoded tokens for complex cursor state:
+
+```csharp
+.WithListPromptsHandler(async (ctx, ct) =>
+{
+    const int pageSize = 15;
+
+    // Decode cursor to get pagination state
+    var state = DecodeCursor(ctx.Params?.Cursor);
+
+    var prompts = await GetPromptsAsync(
+        state.LastTimestamp,
+        state.LastId,
+        pageSize + 1,
+        ct);
+
+    var hasMore = prompts.Count > pageSize;
+    if (hasMore)
+    {
+        prompts.RemoveAt(prompts.Count - 1);
+    }
+
+    string? nextCursor = null;
+    if (hasMore && prompts.Count > 0)
+    {
+        var last = prompts[^1];
+        nextCursor = EncodeCursor(new CursorState
+        {
+            LastTimestamp = last.Timestamp,
+            LastId = last.Id
+        });
+    }
+
+    return new ListPromptsResult
+    {
+        Prompts = prompts,
+        NextCursor = nextCursor
+    };
+});
+
+static string EncodeCursor(CursorState state)
+{
+    var json = JsonSerializer.Serialize(state);
+    return Convert.ToBase64String(Encoding.UTF8.GetBytes(json));
+}
+
+static CursorState DecodeCursor(string? cursor)
+{
+    if (string.IsNullOrEmpty(cursor))
+        return new CursorState();
+
+    var json = Encoding.UTF8.GetString(Convert.FromBase64String(cursor));
+    return JsonSerializer.Deserialize<CursorState>(json) ?? new CursorState();
+}
+```
+
+## Pagination Patterns
+
+<Accordion title="Offset-based (Simple)">
+  Good for: Small datasets, stable ordering
+
+  ```csharp
+  // Cursor stores the offset as a string
+  int offset = int.Parse(cursor ?? "0");
+  var items = allItems.Skip(offset).Take(pageSize);
+  string? nextCursor = hasMore ? (offset + pageSize).ToString() : null;
+  ```
+
+  ⚠️ Can be inefficient for large offsets in databases.
+</Accordion>
+
+<Accordion title="Keyset-based (Recommended)">
+  Good for: Large datasets, database-backed lists
+
+  ```csharp
+  // Cursor stores the last ID from the previous page
+  var query = db.Items.Where(i => i.Id > lastId).OrderBy(i => i.Id);
+  ```
+
+  ✅ Efficient, handles concurrent modifications well.
+</Accordion>
+
+<Accordion title="Token-based (Flexible)">
+  Good for: Complex state, multiple sort fields
+
+  ```csharp
+  // Cursor is an opaque base64-encoded token
+  var state = DecodeToken(cursor);
+  var items = db.Items
+      .Where(i => i.Timestamp > state.Timestamp ||
+                  (i.Timestamp == state.Timestamp && i.Id > state.Id));
+  ```
+
+  ✅ Most flexible, supports complex scenarios.
+</Accordion>
+
+## Best Practices
+
+<Steps>
+  <Step title="Use consistent page sizes">
+    Keep page sizes consistent across requests for predictable performance:
+
+    ```csharp
+    const int PAGE_SIZE = 25;  // Use a constant
+    ```
+  </Step>
+
+  <Step title="Always return null for last page">
+    Only include `NextCursor` when more results exist:
+
+    ```csharp
+    NextCursor = hasMore ? GenerateCursor() : null
+    ```
+  </Step>
+
+  <Step title="Make cursors opaque">
+    Don't rely on cursor format - treat them as opaque tokens:
+
+    ```csharp
+    // ❌ Bad: Assumes cursor format
+    var pageNum = int.Parse(cursor);
+
+    // ✅ Good: Treats cursor as opaque
+    var cursor = ctx.Params?.Cursor;
+    ```
+  </Step>
+
+  <Step title="Handle invalid cursors gracefully">
+    Return an error or restart from the beginning if cursor is invalid:
+
+    ```csharp
+    if (!TryParseCursor(cursor, out var state))
+    {
+        // Start from beginning or return error
+        state = new CursorState();
+    }
+    ```
+  </Step>
+</Steps>
+
+<Warning>
+  Because the cursor format is opaque, **any** value (including empty string) signals more results are available. If a server erroneously sends an empty string cursor with the final page, clients can implement pagination workarounds.
+</Warning>
+
+## API Reference
+
+- [`McpClient.ListToolsAsync()`](https://github.com/modelcontextprotocol/csharp-sdk) - Automatic tool pagination
+- [`McpClient.ListResourcesAsync()`](https://github.com/modelcontextprotocol/csharp-sdk) - Automatic resource pagination
+- [`ListToolsRequestParams`](https://github.com/modelcontextprotocol/csharp-sdk) - Manual pagination parameters
+- [`ListToolsResult`](https://github.com/modelcontextprotocol/csharp-sdk) - Result with NextCursor

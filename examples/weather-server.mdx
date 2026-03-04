@@ -1,0 +1,224 @@
+---
+title: "Weather Server"
+description: "Build a simple MCP server with weather tools using stdio transport"
+---
+
+The QuickstartWeatherServer demonstrates how to build a basic MCP server that provides weather information tools. This example shows the fundamentals of creating an MCP server with stdio transport, dependency injection, and tool registration.
+
+## What You'll Build
+
+A command-line MCP server that exposes two weather tools:
+- **GetAlerts** - Retrieve active weather alerts for any US state
+- **GetForecast** - Get detailed weather forecasts for specific coordinates
+
+The server uses the National Weather Service API to fetch real weather data.
+
+## Complete Example Code
+
+<Steps>
+  <Step title="Create the main Program.cs">
+    This sets up the MCP server with stdio transport and registers the weather tools.
+
+    ```csharp Program.cs
+    using Microsoft.Extensions.DependencyInjection;
+    using Microsoft.Extensions.Hosting;
+    using Microsoft.Extensions.Logging;
+    using QuickstartWeatherServer.Tools;
+    using System.Net.Http.Headers;
+
+    var builder = Host.CreateApplicationBuilder(args);
+
+    builder.Services.AddMcpServer()
+        .WithStdioServerTransport()
+        .WithTools<WeatherTools>();
+
+    builder.Logging.AddConsole(options =>
+    {
+        options.LogToStandardErrorThreshold = LogLevel.Trace;
+    });
+
+    using var httpClient = new HttpClient { BaseAddress = new Uri("https://api.weather.gov") };
+    httpClient.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("weather-tool", "1.0"));
+    builder.Services.AddSingleton(httpClient);
+
+    await builder.Build().RunAsync();
+    ```
+
+    <Note>
+      The server uses stdio transport, which means it communicates via standard input/output. This is the most common transport for MCP servers.
+    </Note>
+  </Step>
+
+  <Step title="Implement the WeatherTools class">
+    Create the tools that will be exposed to MCP clients.
+
+    ```csharp Tools/WeatherTools.cs
+    using ModelContextProtocol;
+    using ModelContextProtocol.Server;
+    using System.ComponentModel;
+    using System.Globalization;
+    using System.Text.Json;
+
+    namespace QuickstartWeatherServer.Tools;
+
+    [McpServerToolType]
+    public sealed class WeatherTools
+    {
+        [McpServerTool, Description("Get weather alerts for a US state.")]
+        public static async Task<string> GetAlerts(
+            HttpClient client,
+            [Description("The US state to get alerts for. Use the 2 letter abbreviation for the state (e.g. NY).")] string state)
+        {
+            using var jsonDocument = await client.ReadJsonDocumentAsync($"/alerts/active/area/{state}");
+            var jsonElement = jsonDocument.RootElement;
+            var alerts = jsonElement.GetProperty("features").EnumerateArray();
+
+            if (!alerts.Any())
+            {
+                return "No active alerts for this state.";
+            }
+
+            return string.Join("\n--\n", alerts.Select(alert =>
+            {
+                JsonElement properties = alert.GetProperty("properties");
+                return $"""
+                        Event: {properties.GetProperty("event").GetString()}
+                        Area: {properties.GetProperty("areaDesc").GetString()}
+                        Severity: {properties.GetProperty("severity").GetString()}
+                        Description: {properties.GetProperty("description").GetString()}
+                        Instruction: {properties.GetProperty("instruction").GetString()}
+                        """;
+            }));
+        }
+
+        [McpServerTool, Description("Get weather forecast for a location.")]
+        public static async Task<string> GetForecast(
+            HttpClient client,
+            [Description("Latitude of the location.")] double latitude,
+            [Description("Longitude of the location.")] double longitude)
+        {
+            var pointUrl = string.Create(CultureInfo.InvariantCulture, $"/points/{latitude},{longitude}");
+            using var locationDocument = await client.ReadJsonDocumentAsync(pointUrl);
+            var forecastUrl = locationDocument.RootElement.GetProperty("properties").GetProperty("forecast").GetString()
+                ?? throw new McpException($"No forecast URL provided by {client.BaseAddress}points/{latitude},{longitude}");
+
+            using var forecastDocument = await client.ReadJsonDocumentAsync(forecastUrl);
+            var periods = forecastDocument.RootElement.GetProperty("properties").GetProperty("periods").EnumerateArray();
+
+            return string.Join("\n---\n", periods.Select(period => $"""
+                    {period.GetProperty("name").GetString()}
+                    Temperature: {period.GetProperty("temperature").GetInt32()}°F
+                    Wind: {period.GetProperty("windSpeed").GetString()} {period.GetProperty("windDirection").GetString()}
+                    Forecast: {period.GetProperty("detailedForecast").GetString()}
+                    """));
+        }
+    }
+    ```
+
+    <Tip>
+      Use the `[Description]` attribute on tools and parameters to provide helpful information to LLMs and clients about what each tool does.
+    </Tip>
+  </Step>
+
+  <Step title="Add the HttpClient extension">
+    This helper simplifies JSON API calls.
+
+    ```csharp Tools/HttpClientExt.cs
+    using System.Text.Json;
+
+    namespace ModelContextProtocol;
+
+    internal static class HttpClientExt
+    {
+        public static async Task<JsonDocument> ReadJsonDocumentAsync(this HttpClient client, string requestUri)
+        {
+            using var response = await client.GetAsync(requestUri);
+            response.EnsureSuccessStatusCode();
+            return await JsonDocument.ParseAsync(await response.Content.ReadAsStreamAsync());
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Create the project file">
+    ```xml QuickstartWeatherServer.csproj
+    <Project Sdk="Microsoft.NET.Sdk">
+
+        <PropertyGroup>
+            <OutputType>Exe</OutputType>
+            <TargetFramework>net8.0</TargetFramework>
+            <ImplicitUsings>enable</ImplicitUsings>
+            <Nullable>enable</Nullable>
+            <PublishAot>true</PublishAot>
+        </PropertyGroup>
+
+        <ItemGroup>
+            <PackageReference Include="Microsoft.Extensions.Hosting" />
+        </ItemGroup>
+
+        <ItemGroup>
+            <ProjectReference Include="..\..\src\ModelContextProtocol\ModelContextProtocol.csproj" />
+        </ItemGroup>
+
+    </Project>
+    ```
+
+    <Note>
+      The example enables AOT compilation for faster startup and smaller binary size.
+    </Note>
+  </Step>
+</Steps>
+
+## Running the Server
+
+```bash
+dotnet run
+```
+
+The server will start and listen for MCP requests via stdio. You can connect to it using any MCP client.
+
+## Key Concepts
+
+### Tool Registration
+
+Tools are registered using the `[McpServerToolType]` attribute on a class and `[McpServerTool]` on methods:
+
+```csharp
+[McpServerToolType]
+public sealed class WeatherTools
+{
+    [McpServerTool, Description("Get weather alerts for a US state.")]
+    public static async Task<string> GetAlerts(...) { }
+}
+```
+
+### Dependency Injection
+
+The SDK automatically injects dependencies like `HttpClient` into tool methods:
+
+```csharp
+public static async Task<string> GetAlerts(
+    HttpClient client,  // Automatically injected
+    string state)       // Provided by the client
+{
+    // ...
+}
+```
+
+### Stdio Transport
+
+The stdio transport allows the server to communicate through standard input/output:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithStdioServerTransport()
+    .WithTools<WeatherTools>();
+```
+
+This is ideal for servers that will be launched by MCP clients as child processes.
+
+## Next Steps
+
+- Learn about [HTTP transport](/examples/http-server) for web-based MCP servers
+- Explore [authentication](/examples/protected-server) to secure your MCP server
+- See how to [build a client](/examples/chat-client) that consumes MCP tools

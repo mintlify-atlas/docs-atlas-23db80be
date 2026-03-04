@@ -1,0 +1,410 @@
+---
+title: URL Elicitation
+description: Handle interactive user prompts and OAuth flows for protected MCP resources
+---
+
+Elicitation enables MCP servers to request additional information from users during tool execution. This is essential for interactive scenarios like OAuth authentication, payment processing, or collecting sensitive credentials.
+
+## Elicitation Modes
+
+The protocol supports two modes:
+
+<CardGroup cols={2}>
+  <Card title="Form (In-Band)" icon="square-list">
+    Server requests structured data via forms that the client collects and returns
+  </Card>
+  <Card title="URL (Out-of-Band)" icon="arrow-up-right-from-square">
+    Server provides a URL for the user to visit for OAuth, payments, or sensitive data entry
+  </Card>
+</CardGroup>
+
+## Configuring the Client
+
+Set up an elicitation handler when creating the client:
+
+```csharp
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+
+var options = new McpClientOptions
+{
+    Capabilities = new ClientCapabilities
+    {
+        Elicitation = new ElicitationCapability
+        {
+            Form = new FormElicitationCapability(),
+            Url = new UrlElicitationCapability()
+        }
+    },
+    Handlers = new()
+    {
+        ElicitationHandler = HandleElicitationAsync
+    }
+};
+
+await using var client = await McpClient.CreateAsync(transport, options);
+
+static async ValueTask<ElicitResult> HandleElicitationAsync(
+    ElicitRequestParams? request,
+    CancellationToken cancellationToken
+)
+{
+    if (request?.Mode == "url")
+    {
+        return await HandleUrlElicitationAsync(request, cancellationToken);
+    }
+    else
+    {
+        return await HandleFormElicitationAsync(request, cancellationToken);
+    }
+}
+```
+
+## URL Mode Elicitation
+
+URL mode is used for OAuth flows, payment processing, or when credentials must be entered on a trusted server page:
+
+```csharp
+static async ValueTask<ElicitResult> HandleUrlElicitationAsync(
+    ElicitRequestParams request,
+    CancellationToken cancellationToken
+)
+{
+    Console.WriteLine("\n" + request.Message);
+    Console.WriteLine($"URL: {request.Url}");
+    Console.WriteLine($"Elicitation ID: {request.ElicitationId}");
+    Console.WriteLine();
+
+    // Show security warning
+    Console.WriteLine("⚠️  Security Warning:");
+    Console.WriteLine("This will open a URL in your browser.");
+    Console.WriteLine($"Please verify this is a trusted source: {new Uri(request.Url!).Host}");
+    Console.WriteLine();
+
+    // Get user consent
+    Console.Write("Do you want to open this URL? (y/n): ");
+    var consent = Console.ReadLine();
+
+    if (consent?.Trim().Equals("y", StringComparison.OrdinalIgnoreCase) == true)
+    {
+        // Open URL in browser
+        Process.Start(new ProcessStartInfo(request.Url!)
+        {
+            UseShellExecute = true
+        });
+
+        Console.WriteLine("\nWaiting for you to complete the interaction...");
+        Console.WriteLine("Press Enter when done.");
+        Console.ReadLine();
+
+        return new ElicitResult { Action = "accept" };
+    }
+    else
+    {
+        Console.WriteLine("User declined to open URL.");
+        return new ElicitResult { Action = "decline" };
+    }
+}
+```
+
+## Form Mode Elicitation
+
+Form mode collects structured data from the user:
+
+```csharp
+static async ValueTask<ElicitResult> HandleFormElicitationAsync(
+    ElicitRequestParams? request,
+    CancellationToken cancellationToken
+)
+{
+    if (request?.RequestedSchema?.Properties is null)
+    {
+        return new ElicitResult { Action = "reject" };
+    }
+
+    Console.WriteLine();
+    Console.WriteLine(request.Message ?? "Please provide the following information:");
+    Console.WriteLine();
+
+    var content = new Dictionary<string, object?>();
+
+    foreach (var (name, schema) in request.RequestedSchema.Properties)
+    {
+        var description = schema.Description ?? name;
+        Console.Write($"{description}: ");
+
+        // Show default if available
+        if (schema.Default is not null)
+        {
+            Console.Write($"[{schema.Default}] ");
+        }
+
+        var input = Console.ReadLine();
+
+        // Use default if input is empty
+        if (string.IsNullOrWhiteSpace(input) && schema.Default is not null)
+        {
+            content[name] = schema.Default;
+        }
+        else if (!string.IsNullOrWhiteSpace(input))
+        {
+            // Parse based on schema type
+            content[name] = schema switch
+            {
+                ElicitRequestParams.NumberSchema => double.Parse(input),
+                ElicitRequestParams.BooleanSchema => 
+                    bool.Parse(input),
+                _ => input
+            };
+        }
+    }
+
+    return new ElicitResult
+    {
+        Action = "accept",
+        Content = content
+    };
+}
+```
+
+## OAuth Example
+
+Here's a complete OAuth example with a local callback server:
+
+```csharp
+using System.Diagnostics;
+using System.Net;
+using System.Web;
+using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Protocol;
+
+var loggerFactory = LoggerFactory.Create(builder =>
+    builder.AddConsole()
+);
+
+var transport = new HttpClientTransport(new()
+{
+    Endpoint = new Uri("http://localhost:7071/"),
+    OAuth = new()
+    {
+        RedirectUri = new Uri("http://localhost:1179/callback"),
+        AuthorizationRedirectDelegate = HandleAuthorizationAsync,
+        DynamicClientRegistration = new()
+        {
+            ClientName = "My MCP Client"
+        }
+    }
+}, loggerFactory: loggerFactory);
+
+await using var client = await McpClient.CreateAsync(
+    transport,
+    loggerFactory: loggerFactory
+);
+
+var tools = await client.ListToolsAsync();
+Console.WriteLine($"Connected with {tools.Count} tools");
+
+static async Task<string?> HandleAuthorizationAsync(
+    Uri authorizationUrl,
+    Uri redirectUri,
+    CancellationToken cancellationToken
+)
+{
+    Console.WriteLine("Starting OAuth flow...");
+    Console.WriteLine($"Opening: {authorizationUrl}");
+
+    var listenerPrefix = redirectUri.GetLeftPart(UriPartial.Authority);
+    if (!listenerPrefix.EndsWith("/")) listenerPrefix += "/";
+
+    using var listener = new HttpListener();
+    listener.Prefixes.Add(listenerPrefix);
+
+    try
+    {
+        listener.Start();
+        Console.WriteLine($"Listening on {listenerPrefix}");
+
+        // Open browser
+        Process.Start(new ProcessStartInfo(authorizationUrl.ToString())
+        {
+            UseShellExecute = true
+        });
+
+        // Wait for callback
+        var context = await listener.GetContextAsync();
+        var query = HttpUtility.ParseQueryString(
+            context.Request.Url?.Query ?? string.Empty
+        );
+        var code = query["code"];
+        var error = query["error"];
+
+        // Send response to browser
+        string html = error is null
+            ? "<h1>Authentication complete</h1><p>You can close this window.</p>"
+            : $"<h1>Authentication failed</h1><p>Error: {error}</p>";
+        
+        byte[] buffer = System.Text.Encoding.UTF8.GetBytes(html);
+        context.Response.ContentType = "text/html";
+        context.Response.ContentLength64 = buffer.Length;
+        await context.Response.OutputStream.WriteAsync(buffer);
+        context.Response.Close();
+
+        if (error is not null)
+        {
+            Console.WriteLine($"Auth error: {error}");
+            return null;
+        }
+
+        Console.WriteLine("Authorization code received");
+        return code;
+    }
+    catch (Exception ex)
+    {
+        Console.WriteLine($"Error: {ex.Message}");
+        return null;
+    }
+    finally
+    {
+        if (listener.IsListening) listener.Stop();
+    }
+}
+```
+
+## Handling UrlElicitationRequiredException
+
+Servers may throw `UrlElicitationRequiredException` when they cannot proceed without URL elicitation:
+
+```csharp
+try
+{
+    var result = await client.CallToolAsync("protected_resource");
+    Console.WriteLine("Success!");
+}
+catch (UrlElicitationRequiredException ex)
+{
+    Console.WriteLine($"Authorization required: {ex.Message}");
+
+    foreach (var elicitation in ex.Elicitations)
+    {
+        Console.WriteLine($"\nPlease authorize:");
+        Console.WriteLine($"  Message: {elicitation.Message}");
+        Console.WriteLine($"  URL: {elicitation.Url}");
+        Console.WriteLine($"  ID: {elicitation.ElicitationId}");
+
+        Console.Write("\nOpen URL? (y/n): ");
+        if (Console.ReadLine()?.ToLower() == "y")
+        {
+            Process.Start(new ProcessStartInfo(elicitation.Url!)
+            {
+                UseShellExecute = true
+            });
+
+            Console.WriteLine("Complete the authorization in your browser...");
+            Console.Write("Press Enter when done: ");
+            Console.ReadLine();
+        }
+    }
+
+    // Retry the operation
+    Console.WriteLine("\nRetrying...");
+    var retryResult = await client.CallToolAsync("protected_resource");
+    Console.WriteLine("Success on retry!");
+}
+```
+
+## Listening for Completion Notifications
+
+Servers can send completion notifications when URL interactions finish:
+
+```csharp
+await using var handler = client.RegisterNotificationHandler(
+    NotificationMethods.ElicitationCompleteNotification,
+    async (notification, cancellationToken) =>
+    {
+        var payload = notification.Params?.Deserialize<
+            ElicitationCompleteNotificationParams
+        >(McpJsonUtilities.DefaultOptions);
+
+        if (payload is not null)
+        {
+            Console.WriteLine(
+                $"Elicitation {payload.ElicitationId} completed!"
+            );
+            // Signal that retry can proceed
+        }
+    }
+);
+```
+
+## Enum Schemas
+
+Form mode supports various enum schema formats:
+
+```csharp
+// Single-select with titles
+["priority"] = new ElicitRequestParams.TitledSingleSelectEnumSchema
+{
+    Description = "Task priority",
+    OneOf =
+    [
+        new() { Const = "p0", Title = "Critical (P0)" },
+        new() { Const = "p1", Title = "High (P1)" },
+        new() { Const = "p2", Title = "Normal (P2)" }
+    ],
+    Default = "p2"
+}
+
+// Multi-select
+["tags"] = new ElicitRequestParams.UntitledMultiSelectEnumSchema
+{
+    Description = "Tags to apply",
+    Items = new()
+    {
+        Enum = ["bug", "feature", "docs", "test"]
+    },
+    Default = ["bug"]
+}
+```
+
+## Best Practices
+
+<Warning>
+**Security**: Always verify URLs before opening them. Show the hostname to users and warn about potential risks.
+</Warning>
+
+<Tip>
+**User Experience**: Provide clear messages explaining what information is needed and why.
+</Tip>
+
+<Note>
+**Defaults**: Use the `Default` property in schemas to pre-fill common values and improve user experience.
+</Note>
+
+## Use Cases
+
+<CardGroup cols={2}>
+  <Card title="OAuth Flows" icon="key">
+    Third-party service authentication requiring browser redirects
+  </Card>
+  <Card title="Payment Processing" icon="credit-card">
+    User confirmation through secure payment interfaces
+  </Card>
+  <Card title="Sensitive Credentials" icon="lock">
+    API keys or secrets entered on trusted server pages
+  </Card>
+  <Card title="Multi-Factor Auth" icon="shield-halved">
+    Additional verification steps during tool execution
+  </Card>
+</CardGroup>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Connecting" icon="plug" href="/clients/connecting">
+    Learn about client connection options
+  </Card>
+  <Card title="LLM Integration" icon="brain" href="/clients/llm-integration">
+    Use MCP tools with Microsoft.Extensions.AI
+  </Card>
+</CardGroup>

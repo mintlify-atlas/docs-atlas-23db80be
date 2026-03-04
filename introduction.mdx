@@ -1,0 +1,122 @@
+---
+title: MCP C# SDK
+description: Build MCP clients and servers in .NET with the official C# SDK for the Model Context Protocol
+---
+
+# MCP C# SDK
+
+The official C# SDK for the [Model Context Protocol](https://modelcontextprotocol.io/), enabling .NET applications, services, and libraries to implement and interact with MCP clients and servers.
+
+<Note>
+  The Model Context Protocol (MCP) is an open protocol that standardizes how applications provide context to Large Language Models (LLMs). It enables secure integration between LLMs and various data sources and tools.
+</Note>
+
+## Key Features
+
+<CardGroup cols={2}>
+  <Card title="Build MCP Clients" icon="arrow-right-to-bracket">
+    Connect to any MCP server and access tools, prompts, and resources. Works with stdio, HTTP, and SSE transports.
+  </Card>
+  
+  <Card title="Create MCP Servers" icon="server">
+    Expose your .NET functionality as MCP tools with attribute-based discovery and dependency injection support.
+  </Card>
+  
+  <Card title="Microsoft.Extensions.AI Integration" icon="wand-magic-sparkles">
+    MCP tools inherit from `AIFunction` and work seamlessly with any `IChatClient` implementation.
+  </Card>
+  
+  <Card title="Multiple Transport Options" icon="network-wired">
+    Support for stdio (process-based), HTTP, and Server-Sent Events (SSE) transports out of the box.
+  </Card>
+  
+  <Card title="Hosting & DI Support" icon="boxes-stacked">
+    Built-in integration with Microsoft.Extensions.Hosting and dependency injection for production-ready servers.
+  </Card>
+  
+  <Card title="AOT Compatible" icon="bolt">
+    Native AOT support for fast startup times and minimal memory footprint in your .NET applications.
+  </Card>
+</CardGroup>
+
+## Three Packages for Different Needs
+
+The SDK consists of three NuGet packages to match your specific requirements:
+
+<CardGroup cols={3}>
+  <Card title="ModelContextProtocol.Core" icon="cube" href="/installation#core-package">
+    **Minimal dependencies**
+    
+    Client and low-level server APIs only. Perfect when you need the smallest footprint.
+  </Card>
+  
+  <Card title="ModelContextProtocol" icon="cubes" href="/installation#main-package">
+    **Recommended starting point**
+    
+    Hosting, dependency injection, and attribute-based discovery. Ideal for most projects.
+  </Card>
+  
+  <Card title="ModelContextProtocol.AspNetCore" icon="globe" href="/installation#aspnetcore-package">
+    **HTTP server support**
+    
+    ASP.NET Core integration for building HTTP-based MCP servers.
+  </Card>
+</CardGroup>
+
+## Quick Example
+
+Here's a complete MCP server in just a few lines of code:
+
+```csharp Program.cs
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using Microsoft.Extensions.Logging;
+using ModelContextProtocol.Server;
+using System.ComponentModel;
+
+var builder = Host.CreateApplicationBuilder(args);
+builder.Logging.AddConsole(options =>
+{
+    options.LogToStandardErrorThreshold = LogLevel.Trace;
+});
+builder.Services
+    .AddMcpServer()
+    .WithStdioServerTransport()
+    .WithToolsFromAssembly();
+await builder.Build().RunAsync();
+
+[McpServerToolType]
+public static class EchoTool
+{
+    [McpServerTool, Description("Echoes the message back to the client.")]
+    public static string Echo(string message) => $"hello {message}";
+}
+```
+
+## Get Started
+
+<CardGroup cols={2}>
+  <Card title="Installation" icon="download" href="/installation">
+    Install the SDK packages and choose the right one for your project
+  </Card>
+  
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Build your first MCP client and server in minutes
+  </Card>
+</CardGroup>
+
+## Learn More
+
+<CardGroup cols={3}>
+  <Card title="Official MCP Documentation" icon="book" href="https://modelcontextprotocol.io/">
+    Learn about the Model Context Protocol specification
+  </Card>
+  
+  <Card title="API Documentation" icon="code" href="https://modelcontextprotocol.github.io/csharp-sdk/api/ModelContextProtocol.html">
+    Explore the complete API reference
+  </Card>
+  
+  <Card title="GitHub Repository" icon="github" href="https://github.com/modelcontextprotocol/csharp-sdk">
+    View source code and contribute to the SDK
+  </Card>
+</CardGroup>

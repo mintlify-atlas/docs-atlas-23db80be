@@ -1,0 +1,337 @@
+---
+title: 'IMcpServerBuilder'
+description: 'Builder interface for configuring MCP servers with dependency injection'
+---
+
+## Overview
+
+The `IMcpServerBuilder` interface provides a fluent API for configuring Model Context Protocol (MCP) servers when using dependency injection. It exposes methods for registering tools, prompts, resources, custom request handlers, and server transports through a chain of method calls.
+
+## Interface Definition
+
+```csharp
+public interface IMcpServerBuilder
+{
+    IServiceCollection Services { get; }
+}
+```
+
+<ParamField path="Services" type="IServiceCollection">
+  Gets the associated service collection for registering additional services and dependencies.
+</ParamField>
+
+## Obtaining the Builder
+
+The builder is obtained from the `AddMcpServer` extension method:
+
+```csharp
+var builder = services.AddMcpServer(options =>
+{
+    options.ServerInfo = new Implementation
+    {
+        Name = "My MCP Server",
+        Version = "1.0.0"
+    };
+});
+```
+
+## Builder Extension Methods
+
+### Tool Registration
+
+<ResponseField name="WithTools<TToolType>" type="IMcpServerBuilder">
+  Discovers and registers all methods on `TToolType` marked with `[McpServerTool]` attribute.
+  
+  **Parameters:**
+  - `serializerOptions` (optional): JSON serializer options for parameter marshalling
+  
+  **Behavior:**
+  - For instance methods, a new instance is created for each tool invocation
+  - For static methods, no instance is created
+  - Supports both public and non-public methods
+</ResponseField>
+
+```csharp
+builder.WithTools<WeatherTools>();
+```
+
+<ResponseField name="WithTools<TToolType>(TToolType target)" type="IMcpServerBuilder">
+  Registers tools from a specific instance. Methods are invoked on the provided target.
+  
+  **Special Case:** If `TToolType` is `IEnumerable<McpServerTool>`, tools are registered directly without method scanning.
+</ResponseField>
+
+```csharp
+var toolInstance = new WeatherTools(apiKey);
+builder.WithTools(toolInstance);
+```
+
+<ResponseField name="WithTools(IEnumerable<McpServerTool> tools)" type="IMcpServerBuilder">
+  Registers pre-created `McpServerTool` instances directly.
+</ResponseField>
+
+```csharp
+builder.WithTools([
+    McpServerTool.Create(
+        typeof(EchoTool).GetMethod(nameof(EchoTool.Echo))!,
+        options: new McpServerToolCreateOptions
+        {
+            Icons = [
+                new Icon
+                {
+                    Source = "https://example.com/icon.svg",
+                    MimeType = "image/svg+xml"
+                }
+            ]
+        })
+]);
+```
+
+<ResponseField name="WithTools(IEnumerable<Type> toolTypes)" type="IMcpServerBuilder">
+  Registers tools from multiple types. Each type's `[McpServerTool]` attributed methods are discovered.
+  
+  <Note>Requires unreferenced code. Not compatible with Native AOT. Use generic `WithTools<T>` instead for AOT scenarios.</Note>
+</ResponseField>
+
+<ResponseField name="WithToolsFromAssembly(Assembly? toolAssembly = null)" type="IMcpServerBuilder">
+  Scans an assembly for types marked with `[McpServerToolType]` and registers all their `[McpServerTool]` methods.
+  
+  **Parameters:**
+  - `toolAssembly`: Assembly to scan. If null, uses calling assembly.
+  - `serializerOptions` (optional): JSON serializer options
+  
+  <Note>Requires unreferenced code. Not compatible with Native AOT.</Note>
+</ResponseField>
+
+### Prompt Registration
+
+<ResponseField name="WithPrompts<TPromptType>" type="IMcpServerBuilder">
+  Discovers and registers all methods on `TPromptType` marked with `[McpServerPrompt]` attribute.
+</ResponseField>
+
+```csharp
+builder.WithPrompts<SimplePromptType>();
+```
+
+<ResponseField name="WithPrompts<TPromptType>(TPromptType target)" type="IMcpServerBuilder">
+  Registers prompts from a specific instance.
+  
+  **Special Case:** If `TPromptType` is `IEnumerable<McpServerPrompt>`, prompts are registered directly.
+</ResponseField>
+
+<ResponseField name="WithPrompts(IEnumerable<McpServerPrompt> prompts)" type="IMcpServerBuilder">
+  Registers pre-created `McpServerPrompt` instances.
+</ResponseField>
+
+<ResponseField name="WithPrompts(IEnumerable<Type> promptTypes)" type="IMcpServerBuilder">
+  Registers prompts from multiple types.
+  
+  <Note>Requires unreferenced code. Not compatible with Native AOT.</Note>
+</ResponseField>
+
+<ResponseField name="WithPromptsFromAssembly(Assembly? promptAssembly = null)" type="IMcpServerBuilder">
+  Scans assembly for `[McpServerPromptType]` classes and registers their `[McpServerPrompt]` methods.
+  
+  <Note>Requires unreferenced code. Not compatible with Native AOT.</Note>
+</ResponseField>
+
+### Resource Registration
+
+<ResponseField name="WithResources<TResourceType>" type="IMcpServerBuilder">
+  Discovers and registers all methods on `TResourceType` marked with `[McpServerResource]` attribute.
+</ResponseField>
+
+```csharp
+builder.WithResources<SimpleResourceType>();
+```
+
+<ResponseField name="WithResources<TResourceType>(TResourceType target)" type="IMcpServerBuilder">
+  Registers resources from a specific instance.
+  
+  **Special Case:** If `TResourceType` is `IEnumerable<McpServerResource>`, resources are registered directly.
+</ResponseField>
+
+<ResponseField name="WithResources(IEnumerable<McpServerResource> resourceTemplates)" type="IMcpServerBuilder">
+  Registers pre-created `McpServerResource` instances.
+</ResponseField>
+
+<ResponseField name="WithResources(IEnumerable<Type> resourceTemplateTypes)" type="IMcpServerBuilder">
+  Registers resources from multiple types.
+  
+  <Note>Requires unreferenced code. Not compatible with Native AOT.</Note>
+</ResponseField>
+
+<ResponseField name="WithResourcesFromAssembly(Assembly? resourceAssembly = null)" type="IMcpServerBuilder">
+  Scans assembly for `[McpServerResourceType]` classes and registers their `[McpServerResource]` methods.
+  
+  <Note>Requires unreferenced code. Not compatible with Native AOT.</Note>
+</ResponseField>
+
+### Request Handlers
+
+<ResponseField name="WithListToolsHandler" type="IMcpServerBuilder">
+  Configures a handler for listing available tools.
+  
+  ```csharp
+  builder.WithListToolsHandler(async (ctx, ct) =>
+  {
+      return new ListToolsResult
+      {
+          Tools = dynamicTools
+      };
+  });
+  ```
+  
+  <Note>Typically paired with `WithCallToolHandler` for complete tool implementation.</Note>
+</ResponseField>
+
+<ResponseField name="WithCallToolHandler" type="IMcpServerBuilder">
+  Configures a handler for executing tool calls.
+</ResponseField>
+
+<ResponseField name="WithListPromptsHandler" type="IMcpServerBuilder">
+  Configures a handler for listing available prompts.
+  
+  <Note>Typically paired with `WithGetPromptHandler`.</Note>
+</ResponseField>
+
+<ResponseField name="WithGetPromptHandler" type="IMcpServerBuilder">
+  Configures a handler for retrieving prompt content.
+</ResponseField>
+
+<ResponseField name="WithListResourcesHandler" type="IMcpServerBuilder">
+  Configures a handler for listing available resources.
+  
+  <Note>Typically paired with `WithReadResourceHandler`.</Note>
+</ResponseField>
+
+<ResponseField name="WithReadResourceHandler" type="IMcpServerBuilder">
+  Configures a handler for reading resource content.
+</ResponseField>
+
+<ResponseField name="WithListResourceTemplatesHandler" type="IMcpServerBuilder">
+  Configures a handler for listing resource templates (URI patterns).
+</ResponseField>
+
+<ResponseField name="WithCompleteHandler" type="IMcpServerBuilder">
+  Configures a handler for auto-completion suggestions for prompt arguments or resource references.
+  
+  ```csharp
+  builder.WithCompleteHandler(async (ctx, ct) =>
+  {
+      var values = suggestionList.Where(v => v.StartsWith(ctx.Params.Argument.Value));
+      return new CompleteResult
+      {
+          Completion = new Completion { Values = [..values] }
+      };
+  });
+  ```
+</ResponseField>
+
+<ResponseField name="WithSubscribeToResourcesHandler" type="IMcpServerBuilder">
+  Configures a handler for resource subscription requests.
+  
+  <Note>Typically paired with `WithUnsubscribeFromResourcesHandler`.</Note>
+</ResponseField>
+
+<ResponseField name="WithUnsubscribeFromResourcesHandler" type="IMcpServerBuilder">
+  Configures a handler for resource unsubscription requests.
+</ResponseField>
+
+<ResponseField name="WithSetLoggingLevelHandler" type="IMcpServerBuilder">
+  Configures a handler for logging level change requests from clients.
+</ResponseField>
+
+### Filters
+
+<ResponseField name="WithMessageFilters" type="IMcpServerBuilder">
+  Configures message-level filters for the MCP server.
+  
+  ```csharp
+  builder.WithMessageFilters(filters =>
+  {
+      filters.AddFilter(async (context, next) =>
+      {
+          // Pre-processing
+          var result = await next(context);
+          // Post-processing
+          return result;
+      });
+  });
+  ```
+</ResponseField>
+
+<ResponseField name="WithRequestFilters" type="IMcpServerBuilder">
+  Configures request-specific filters for the MCP server.
+  
+  ```csharp
+  builder.WithRequestFilters(filters =>
+  {
+      filters.AddFilter(async (context, next) =>
+      {
+          // Request filtering logic
+          return await next(context);
+      });
+  });
+  ```
+</ResponseField>
+
+### Transport Configuration
+
+<ResponseField name="WithStdioServerTransport" type="IMcpServerBuilder">
+  Adds a server transport using standard input/output streams.
+  
+  ```csharp
+  builder.WithStdioServerTransport();
+  ```
+  
+  **Use Cases:**
+  - Local server launched by a client process
+  - Command-line MCP servers
+  - Server exits when stdin is closed
+</ResponseField>
+
+<ResponseField name="WithStreamServerTransport" type="IMcpServerBuilder">
+  Adds a server transport using custom input/output streams.
+  
+  ```csharp
+  builder.WithStreamServerTransport(inputStream, outputStream);
+  ```
+  
+  **Parameters:**
+  - `inputStream`: Stream to use as standard input
+  - `outputStream`: Stream to use as standard output
+</ResponseField>
+
+## Complete Example
+
+```csharp
+using Microsoft.Extensions.DependencyInjection;
+using ModelContextProtocol.Server;
+
+var services = new ServiceCollection();
+
+services.AddMcpServer(options =>
+{
+    options.ServerInfo = new Implementation
+    {
+        Name = "Everything Server",
+        Version = "1.0.0"
+    };
+})
+.WithTools<AddTool>()
+.WithTools<WeatherTools>()
+.WithPrompts<SimplePromptType>()
+.WithResources<SimpleResourceType>()
+.WithStdioServerTransport();
+
+var serviceProvider = services.BuildServiceProvider();
+var server = serviceProvider.GetRequiredService<McpServer>();
+await server.RunAsync();
+```
+
+## See Also
+
+- [McpServerServiceCollectionExtensions](/api/main/hosting) - Entry point with `AddMcpServer()`
+- [Server Attributes](/api/main/attributes) - `[McpServerTool]`, `[McpServerPrompt]`, `[McpServerResource]`
+- [Protocol Types](/api/core/protocol-types) - MCP protocol types including Tool, Prompt, and Resource

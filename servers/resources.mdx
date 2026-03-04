@@ -1,0 +1,473 @@
+---
+title: Implementing Resources
+description: Build MCP server resources with the [McpServerResource] attribute
+---
+
+Resources expose data and content that MCP clients can read. The C# SDK supports both direct resources (static URIs) and resource templates (parameterized URIs).
+
+## Basic Resource Implementation
+
+Use the `[McpServerResource]` attribute to mark methods as MCP resources:
+
+```csharp SimpleResourceType.cs
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+using System.ComponentModel;
+
+[McpServerResourceType]
+public class SimpleResourceType
+{
+    [McpServerResource(
+        UriTemplate = "test://direct/text/resource",
+        Name = "Direct Text Resource",
+        MimeType = "text/plain",
+        IconSource = "https://example.com/memo.svg"
+    )]
+    [Description("A direct text resource")]
+    public static string DirectTextResource() => "This is a direct resource";
+}
+```
+
+## Registering Resources
+
+Register resource types with the MCP server builder:
+
+```csharp Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithResources<SimpleResourceType>();
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+## Direct Resources vs Resource Templates
+
+### Direct Resources
+
+Direct resources have fixed URIs without parameters:
+
+```csharp
+[McpServerResource(
+    UriTemplate = "app://config/settings",
+    Name = "Application Settings",
+    MimeType = "application/json"
+)]
+[Description("Current application configuration")]
+public static string GetSettings()
+{
+    return JsonSerializer.Serialize(new
+    {
+        Version = "1.0.0",
+        Environment = "production"
+    });
+}
+```
+
+<Note>
+  Direct resources are listed via `resources/list` requests.
+</Note>
+
+### Resource Templates
+
+Resource templates accept parameters in the URI:
+
+```csharp
+[McpServerResource(
+    UriTemplate = "test://template/resource/{id}",
+    Name = "Template Resource"
+)]
+[Description("A template resource with a numeric ID")]
+public static ResourceContents TemplateResource(
+    RequestContext<ReadResourceRequestParams> requestContext,
+    int id)
+{
+    if (id < 1 || id > 100)
+    {
+        throw new NotSupportedException($"Unknown resource: {requestContext.Params?.Uri}");
+    }
+
+    return new TextResourceContents
+    {
+        Text = $"Resource content for ID {id}",
+        MimeType = "text/plain",
+        Uri = requestContext.Params!.Uri
+    };
+}
+```
+
+<Note>
+  Resource templates are listed via `resources/templates/list` requests and support URI parameter extraction.
+</Note>
+
+## Resource Attribute Properties
+
+<ParamField path="UriTemplate" type="string" required>
+  The URI template for the resource. Can include `{parameter}` placeholders for templates.
+</ParamField>
+
+<ParamField path="Name" type="string">
+  The resource's name. If null, the method name is used.
+</ParamField>
+
+<ParamField path="Title" type="string">
+  A human-readable title for the resource.
+</ParamField>
+
+<ParamField path="MimeType" type="string">
+  The MIME type of the resource content (e.g., "text/plain", "application/json").
+</ParamField>
+
+<ParamField path="IconSource" type="string">
+  URI for the resource's icon (HTTP/HTTPS URL or data URI).
+</ParamField>
+
+## Parameter Binding
+
+### URI Template Parameters
+
+Parameters in the URI template are automatically extracted and bound:
+
+```csharp
+[McpServerResource(UriTemplate = "files://{category}/{filename}")]
+public static string GetFile(string category, string filename)
+{
+    return $"Category: {category}, File: {filename}";
+}
+```
+
+### Special Parameter Types
+
+Like tools, resources support special parameter types:
+
+<Steps>
+  <Step title="RequestContext<ReadResourceRequestParams>">
+    Access the full request context:
+    ```csharp
+    [McpServerResource(UriTemplate = "app://resource/{id}")]
+    public static ResourceContents GetResource(
+        RequestContext<ReadResourceRequestParams> requestContext,
+        int id)
+    {
+        var uri = requestContext.Params?.Uri;
+        // ... implementation
+    }
+    ```
+  </Step>
+
+  <Step title="CancellationToken">
+    Support cancellation for long operations:
+    ```csharp
+    [McpServerResource(UriTemplate = "data://large/{id}")]
+    public static async Task<string> GetLargeData(
+        int id,
+        CancellationToken cancellationToken)
+    {
+        await Task.Delay(1000, cancellationToken);
+        return "Large data content";
+    }
+    ```
+  </Step>
+
+  <Step title="McpServer">
+    Access the server instance:
+    ```csharp
+    [McpServerResource(UriTemplate = "app://status")]
+    public static string GetServerStatus(McpServer server)
+    {
+        return $"Session: {server.SessionId}";
+    }
+    ```
+  </Step>
+
+  <Step title="IServiceProvider">
+    Resolve services from dependency injection:
+    ```csharp
+    [McpServerResource(UriTemplate = "data://external/{id}")]
+    public static async Task<string> GetExternalData(
+        int id,
+        IServiceProvider services)
+    {
+        var httpClient = services.GetRequiredService<HttpClient>();
+        return await httpClient.GetStringAsync($"https://api.example.com/{id}");
+    }
+    ```
+  </Step>
+</Steps>
+
+## Return Types
+
+The SDK converts various return types to `ReadResourceResult`:
+
+<CodeGroup>
+```csharp String
+[McpServerResource(UriTemplate = "app://text")]
+public static string GetText() => "Plain text content";
+// Converted to TextResourceContents
+```
+
+```csharp ResourceContents
+[McpServerResource(UriTemplate = "app://data/{id}")]
+public static ResourceContents GetData(int id)
+{
+    return new TextResourceContents
+    {
+        Text = $"Data for {id}",
+        MimeType = "text/plain",
+        Uri = $"app://data/{id}"
+    };
+}
+```
+
+```csharp Binary Content
+[McpServerResource(UriTemplate = "app://image/{id}")]
+public static ResourceContents GetImage(int id)
+{
+    return new BlobResourceContents
+    {
+        Blob = imageBytes,
+        MimeType = "image/png",
+        Uri = $"app://image/{id}"
+    };
+}
+```
+
+```csharp Multiple Resources
+[McpServerResource(UriTemplate = "app://bundle/{id}")]
+public static IEnumerable<ResourceContents> GetBundle(int id)
+{
+    return [
+        new TextResourceContents
+        {
+            Text = "First resource",
+            MimeType = "text/plain",
+            Uri = $"app://bundle/{id}/1"
+        },
+        new TextResourceContents
+        {
+            Text = "Second resource",
+            MimeType = "text/plain",
+            Uri = $"app://bundle/{id}/2"
+        }
+    ];
+}
+```
+</CodeGroup>
+
+## Text vs Blob Resources
+
+### Text Resources
+
+For text-based content:
+
+```csharp
+public static TextResourceContents GetTextResource()
+{
+    return new TextResourceContents
+    {
+        Text = "Content goes here",
+        MimeType = "text/plain",
+        Uri = "app://resource"
+    };
+}
+```
+
+### Blob Resources
+
+For binary content:
+
+```csharp
+public static BlobResourceContents GetBinaryResource()
+{
+    byte[] imageData = Convert.FromBase64String("iVBORw0KG...");
+    
+    return new BlobResourceContents
+    {
+        Blob = imageData,
+        MimeType = "image/png",
+        Uri = "app://resource"
+    };
+}
+```
+
+## Instance Methods with Dependencies
+
+Use instance methods for resources that need services:
+
+```csharp
+[McpServerResourceType]
+public class FileResources
+{
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<FileResources> _logger;
+
+    public FileResources(
+        IConfiguration configuration,
+        ILogger<FileResources> logger)
+    {
+        _configuration = configuration;
+        _logger = logger;
+    }
+
+    [McpServerResource(UriTemplate = "file://{path}")]
+    [Description("Read a file from the configured directory")]
+    public async Task<ResourceContents> ReadFile(
+        string path,
+        CancellationToken cancellationToken)
+    {
+        var baseDirectory = _configuration["FilesDirectory"];
+        var fullPath = Path.Combine(baseDirectory, path);
+        
+        _logger.LogInformation("Reading file: {Path}", fullPath);
+        
+        var content = await File.ReadAllTextAsync(fullPath, cancellationToken);
+        
+        return new TextResourceContents
+        {
+            Text = content,
+            MimeType = "text/plain",
+            Uri = $"file://{path}"
+        };
+    }
+}
+```
+
+## Resource Subscriptions
+
+Clients can subscribe to resources for change notifications:
+
+```csharp Program.cs
+var subscriptions = new ConcurrentDictionary<string, ConcurrentDictionary<string, byte>>();
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithResources<MyResources>()
+    .WithSubscribeToResourcesHandler(async (ctx, ct) =>
+    {
+        if (ctx.Server.SessionId == null || ctx.Params?.Uri == null)
+        {
+            return new EmptyResult();
+        }
+        
+        // Track subscription
+        if (!subscriptions.ContainsKey(ctx.Server.SessionId))
+        {
+            subscriptions[ctx.Server.SessionId] = new();
+        }
+        subscriptions[ctx.Server.SessionId].TryAdd(ctx.Params.Uri, 0);
+        
+        return new EmptyResult();
+    })
+    .WithUnsubscribeFromResourcesHandler(async (ctx, ct) =>
+    {
+        if (ctx.Server.SessionId == null || ctx.Params?.Uri == null)
+        {
+            return new EmptyResult();
+        }
+        
+        // Remove subscription
+        if (subscriptions.TryGetValue(ctx.Server.SessionId, out var uris))
+        {
+            uris.TryRemove(ctx.Params.Uri, out _);
+        }
+        
+        return new EmptyResult();
+    });
+```
+
+Notify subscribers of changes:
+
+```csharp
+public async Task NotifyResourceChanged(
+    McpServer server,
+    string uri)
+{
+    await server.SendNotificationAsync(
+        "notifications/resources/updated",
+        new { Uri = uri });
+}
+```
+
+## Resource Metadata
+
+Add custom metadata to resources:
+
+```csharp
+[McpServerResource(UriTemplate = "data://products/{id}")]
+[McpMeta("source", "database")]
+[McpMeta("cacheEnabled", true)]
+[McpMeta("refreshInterval", 60.0)]
+[Description("Product information from database")]
+public static ResourceContents GetProduct(int id)
+{
+    // ... implementation
+}
+```
+
+## Advanced Configuration
+
+### Programmatic Resource Creation
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithResources([
+        McpServerResource.Create(
+            typeof(MyResources).GetMethod(nameof(MyResources.GetData))!,
+            options: new McpServerResourceCreateOptions
+            {
+                Icons = [
+                    new Icon
+                    {
+                        Source = "https://example.com/icon.svg",
+                        MimeType = "image/svg+xml"
+                    }
+                ]
+            })
+    ]);
+```
+
+### Multiple Registration Methods
+
+```csharp
+// Register by type
+.WithResources<FileResources>()
+
+// Register from assembly
+.WithResourcesFromAssembly()
+
+// Register from types collection
+.WithResources([typeof(Resource1), typeof(Resource2)])
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Choose Appropriate URIs">
+    Use descriptive URI schemes that clearly indicate the resource type (e.g., `file://`, `db://`, `api://`).
+  </Step>
+
+  <Step title="Set MIME Types">
+    Always specify the correct MIME type to help clients handle content properly.
+  </Step>
+
+  <Step title="Validate Parameters">
+    Validate URI template parameters to prevent access to unauthorized resources.
+  </Step>
+
+  <Step title="Handle Errors">
+    Throw `McpException` or `NotSupportedException` for invalid resource URIs.
+  </Step>
+
+  <Step title="Support Cancellation">
+    Accept `CancellationToken` for resources that perform I/O operations.
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Learn about [Tools](/servers/tools) for executable functions
+- Explore [Prompts](/servers/prompts) for prompt templates
+- Add [Completions](/servers/completions) for argument suggestions

@@ -1,0 +1,548 @@
+---
+title: ASP.NET Core HTTP Servers
+description: Build MCP servers with ASP.NET Core and HTTP transport
+---
+
+The MCP C# SDK provides first-class integration with ASP.NET Core, enabling you to build HTTP-based MCP servers with all the features of the ASP.NET Core framework.
+
+## Quick Start
+
+Create an ASP.NET Core MCP server:
+
+```csharp Program.cs
+using AspNetCoreMcpServer.Tools;
+using AspNetCoreMcpServer.Resources;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<WeatherTools>()
+    .WithResources<FileResources>();
+
+var app = builder.Build();
+
+app.MapMcp();
+
+app.Run();
+```
+
+## HTTP Transport Configuration
+
+Configure the HTTP transport with `WithHttpTransport`:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        // Configure per-session options
+        options.ConfigureSessionOptions = async (httpContext, mcpOptions, ct) =>
+        {
+            // Customize MCP options per HTTP request
+            var userId = httpContext.User.FindFirst("user_id")?.Value;
+            mcpOptions.ServerInfo.Name = $"Server for {userId}";
+        };
+
+        // Configure custom session lifecycle
+        options.RunSessionHandler = async (httpContext, mcpServer, ct) =>
+        {
+            // Setup before session starts
+            var sessionId = mcpServer.SessionId;
+            Console.WriteLine($"Session {sessionId} starting");
+
+            try
+            {
+                await mcpServer.RunAsync(ct);
+            }
+            finally
+            {
+                // Cleanup after session ends
+                Console.WriteLine($"Session {sessionId} ended");
+            }
+        };
+    });
+```
+
+## Mapping MCP Endpoints
+
+The `MapMcp` method sets up HTTP endpoints:
+
+```csharp
+// Map at root path
+app.MapMcp();
+
+// Map at custom path
+app.MapMcp("/mcp");
+
+// Configure endpoint conventions
+app.MapMcp("/api/mcp")
+    .RequireAuthorization()
+    .RequireCors("McpCorsPolicy");
+```
+
+### Supported Endpoints
+
+The SDK maps the following endpoints:
+
+<Steps>
+  <Step title="POST /">
+    Streamable HTTP transport - primary endpoint for MCP requests
+  </Step>
+
+  <Step title="GET /">
+    Resume or reconnect to existing sessions (stateful mode only)
+  </Step>
+
+  <Step title="DELETE /">
+    Explicitly close a session (stateful mode only)
+  </Step>
+
+  <Step title="GET /sse">
+    Legacy HTTP with SSE transport (backward compatibility)
+  </Step>
+
+  <Step title="POST /message">
+    Legacy message endpoint for SSE transport
+  </Step>
+</Steps>
+
+## Stateless vs Stateful Mode
+
+### Stateful Mode (Default)
+
+Maintains session state across requests:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithHttpTransport(); // Stateful by default
+```
+
+Features:
+- Session persistence across requests
+- Support for subscriptions and notifications
+- Resume capability via GET endpoint
+- Session cleanup via DELETE endpoint
+
+### Stateless Mode
+
+Each request is independent:
+
+```csharp
+builder.Services.AddMcpServer(options =>
+{
+    options.Stateless = true;
+})
+.WithHttpTransport();
+```
+
+Features:
+- No session state maintained
+- Better scalability for simple servers
+- No subscription support
+- Only POST endpoint available
+
+## Per-Session Tools and Resources
+
+Dynamically configure tools per session based on route or user:
+
+```csharp Program.cs
+using System.Collections.Concurrent;
+using ModelContextProtocol.Server;
+
+var toolDictionary = new ConcurrentDictionary<string, McpServerTool[]>();
+PopulateToolDictionary(toolDictionary);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.ConfigureSessionOptions = async (httpContext, mcpOptions, ct) =>
+        {
+            // Get category from route
+            var category = httpContext.Request.RouteValues["category"]?.ToString() ?? "all";
+            
+            // Configure tools for this session
+            if (toolDictionary.TryGetValue(category, out var tools))
+            {
+                mcpOptions.Capabilities = new();
+                mcpOptions.Capabilities.Tools = new();
+                mcpOptions.ToolCollection = new(tools);
+            }
+        };
+    });
+
+var app = builder.Build();
+
+// Map with route parameter
+app.MapMcp("/{category?}");
+
+app.Run();
+
+static void PopulateToolDictionary(ConcurrentDictionary<string, McpServerTool[]> dict)
+{
+    var mathTools = GetToolsForType<MathTools>();
+    var textTools = GetToolsForType<TextTools>();
+    
+    dict.TryAdd("math", mathTools);
+    dict.TryAdd("text", textTools);
+    dict.TryAdd("all", [..mathTools, ..textTools]);
+}
+```
+
+## Authentication and Authorization
+
+### Basic Authentication
+
+Use ASP.NET Core authentication:
+
+```csharp
+builder.Services.AddAuthentication()
+    .AddJwtBearer();
+
+builder.Services.AddAuthorization();
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport();
+
+var app = builder.Build();
+
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapMcp()
+    .RequireAuthorization();
+
+app.Run();
+```
+
+### Per-Tool Authorization
+
+Apply authorization to specific tools:
+
+```csharp
+using Microsoft.AspNetCore.Authorization;
+
+[McpServerToolType]
+public class AdminTools
+{
+    [McpServerTool]
+    [Authorize(Roles = "Admin")]
+    [Description("Delete all data - admin only")]
+    public static string DeleteAllData()
+    {
+        // ... implementation
+        return "Data deleted";
+    }
+}
+```
+
+### MCP Authentication Handler
+
+Use the built-in MCP authentication:
+
+```csharp
+builder.Services.AddAuthentication()
+    .AddMcpAuthentication();
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport();
+```
+
+## Dependency Injection
+
+### Injecting Services into Tools
+
+Tools can receive services via constructor injection:
+
+```csharp
+[McpServerToolType]
+public sealed class DatabaseTools
+{
+    private readonly IDbContext _dbContext;
+    private readonly ILogger<DatabaseTools> _logger;
+
+    public DatabaseTools(
+        IDbContext dbContext,
+        ILogger<DatabaseTools> logger)
+    {
+        _dbContext = dbContext;
+        _logger = logger;
+    }
+
+    [McpServerTool]
+    [Description("Query the database")]
+    public async Task<string> QueryData(
+        [Description("SQL query")] string query,
+        CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Executing query: {Query}", query);
+        var results = await _dbContext.QueryAsync(query, cancellationToken);
+        return JsonSerializer.Serialize(results);
+    }
+}
+```
+
+### Scoped Services
+
+Register scoped services for per-request lifetime:
+
+```csharp
+builder.Services.AddScoped<IDataService, DataService>();
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<DataTools>();
+```
+
+## HttpClient Configuration
+
+Configure HttpClient for tools:
+
+```csharp Program.cs
+using System.Net.Http.Headers;
+
+builder.Services.AddHttpClient("WeatherApi", client =>
+{
+    client.BaseAddress = new Uri("https://api.weather.gov");
+    client.DefaultRequestHeaders.UserAgent.Add(
+        new ProductInfoHeaderValue("mcp-weather", "1.0"));
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<WeatherTools>();
+```
+
+Use in tools:
+
+```csharp
+[McpServerToolType]
+public sealed class WeatherTools
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+
+    public WeatherTools(IHttpClientFactory httpClientFactory)
+    {
+        _httpClientFactory = httpClientFactory;
+    }
+
+    [McpServerTool]
+    public async Task<string> GetWeather(string location)
+    {
+        var client = _httpClientFactory.CreateClient("WeatherApi");
+        return await client.GetStringAsync($"/forecast/{location}");
+    }
+}
+```
+
+## CORS Configuration
+
+Enable CORS for browser-based clients:
+
+```csharp
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("McpCorsPolicy", policy =>
+    {
+        policy.WithOrigins("https://client.example.com")
+              .AllowAnyHeader()
+              .AllowAnyMethod()
+              .AllowCredentials();
+    });
+});
+
+var app = builder.Build();
+
+app.UseCors();
+
+app.MapMcp()
+    .RequireCors("McpCorsPolicy");
+
+app.Run();
+```
+
+## OpenTelemetry Integration
+
+Add observability with OpenTelemetry:
+
+```csharp
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
+
+builder.Services.AddOpenTelemetry()
+    .WithTracing(b => b
+        .AddSource("*")
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation())
+    .WithMetrics(b => b
+        .AddMeter("*")
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation())
+    .WithLogging()
+    .UseOtlpExporter();
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<MyTools>();
+```
+
+## Health Checks
+
+Add health check endpoints:
+
+```csharp
+builder.Services.AddHealthChecks()
+    .AddCheck("mcp-server", () => HealthCheckResult.Healthy());
+
+var app = builder.Build();
+
+app.MapHealthChecks("/health");
+app.MapMcp();
+
+app.Run();
+```
+
+## Distributed Caching for SSE
+
+Enable SSE event stream resumption with distributed caching:
+
+```csharp
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = "localhost:6379";
+});
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithDistributedCacheEventStreamStore();
+```
+
+## Kestrel Configuration
+
+Configure the underlying HTTP server:
+
+```csharp
+builder.WebHost.ConfigureKestrel(options =>
+{
+    options.ListenAnyIP(5000);
+    options.ListenAnyIP(5001, listenOptions =>
+    {
+        listenOptions.UseHttps("certificate.pfx", "password");
+    });
+    
+    options.Limits.MaxRequestBodySize = 10 * 1024 * 1024; // 10 MB
+    options.Limits.KeepAliveTimeout = TimeSpan.FromMinutes(2);
+});
+```
+
+## Complete Example
+
+A production-ready ASP.NET Core MCP server:
+
+```csharp Program.cs
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using OpenTelemetry.Metrics;
+using OpenTelemetry.Trace;
+using MyServer.Tools;
+using MyServer.Resources;
+
+var builder = WebApplication.CreateBuilder(args);
+
+// Authentication
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = builder.Configuration["Auth:Authority"];
+        options.Audience = builder.Configuration["Auth:Audience"];
+    });
+
+builder.Services.AddAuthorization();
+
+// CORS
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("Default", policy =>
+    {
+        policy.AllowAnyOrigin()
+              .AllowAnyHeader()
+              .AllowAnyMethod();
+    });
+});
+
+// HttpClient
+builder.Services.AddHttpClient("ExternalApi", client =>
+{
+    client.BaseAddress = new Uri(builder.Configuration["ExternalApi:BaseUrl"]);
+    client.Timeout = TimeSpan.FromSeconds(30);
+});
+
+// MCP Server
+builder.Services.AddMcpServer(options =>
+{
+    options.ServerInfo = new()
+    {
+        Name = "My Production Server",
+        Version = "1.0.0"
+    };
+})
+.WithHttpTransport()
+.WithTools<DataTools>()
+.WithResources<FileResources>()
+.AddAuthorizationFilters();
+
+// OpenTelemetry
+builder.Services.AddOpenTelemetry()
+    .WithTracing(b => b
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation())
+    .WithMetrics(b => b
+        .AddAspNetCoreInstrumentation())
+    .UseOtlpExporter();
+
+// Health Checks
+builder.Services.AddHealthChecks();
+
+var app = builder.Build();
+
+app.UseHttpsRedirection();
+app.UseCors("Default");
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapHealthChecks("/health");
+app.MapMcp("/api/mcp")
+    .RequireAuthorization()
+    .RequireCors("Default");
+
+app.Run();
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Use HTTPS in Production">
+    Always use HTTPS for production servers to protect data in transit.
+  </Step>
+
+  <Step title="Configure Authentication">
+    Require authentication for sensitive tools and resources.
+  </Step>
+
+  <Step title="Set Timeouts">
+    Configure appropriate timeouts for HttpClient and long-running operations.
+  </Step>
+
+  <Step title="Enable Observability">
+    Use OpenTelemetry for distributed tracing and metrics.
+  </Step>
+
+  <Step title="Implement Health Checks">
+    Add health check endpoints for monitoring and orchestration.
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Learn about [Tools](/servers/tools) for executable functions
+- Add [Filters](/servers/filters) for cross-cutting concerns
+- Implement [Logging](/servers/logging) for diagnostics

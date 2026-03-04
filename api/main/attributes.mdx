@@ -1,0 +1,493 @@
+---
+title: 'Server Attributes'
+description: 'Attributes for marking methods as MCP tools, prompts, and resources'
+---
+
+## Overview
+
+The MCP C# SDK uses attributes to declaratively define tools, prompts, and resources. Methods marked with these attributes are automatically discovered and registered when using the builder's `WithTools`, `WithPrompts`, or `WithResources` methods.
+
+## McpServerToolAttribute
+
+### Purpose
+
+Indicates that a method should be exposed as an MCP tool that clients can invoke.
+
+### Syntax
+
+```csharp
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class McpServerToolAttribute : Attribute
+```
+
+### Properties
+
+<ParamField path="Name" type="string">
+  The name of the tool. If null, the method name is used.
+</ParamField>
+
+<ParamField path="Title" type="string">
+  A human-readable title for the tool that can be displayed to users. Unlike the tool name (which follows programmatic naming conventions), the title can include spaces and special characters.
+</ParamField>
+
+<ParamField path="Destructive" type="bool" default="true">
+  Indicates whether the tool might perform destructive updates to its environment. Set to `false` if the tool performs only additive updates.
+</ParamField>
+
+<ParamField path="Idempotent" type="bool" default="false">
+  Indicates whether calling the tool repeatedly with the same arguments has no additional effect on its environment.
+</ParamField>
+
+<ParamField path="OpenWorld" type="bool" default="true">
+  Indicates whether this tool can interact with an "open world" of external entities (like web search). Set to `false` if the tool's domain is closed and well-defined (like memory access).
+</ParamField>
+
+<ParamField path="ReadOnly" type="bool" default="false">
+  Indicates whether this tool does not modify its environment. Read-only tools only perform read operations without changing state.
+</ParamField>
+
+<ParamField path="UseStructuredContent" type="bool" default="false">
+  When enabled, the tool will populate the `Tool.OutputSchema` and provide structured content in the `CallToolResult.StructuredContent` property.
+</ParamField>
+
+<ParamField path="IconSource" type="string">
+  The source URI for the tool's icon. Can be an HTTP/HTTPS URL or a data URI with base64-encoded image data. For advanced icon configuration (multiple icons, MIME types, sizes), use `McpServerToolCreateOptions.Icons`.
+</ParamField>
+
+<ParamField path="TaskSupport" type="ToolTaskSupport" default="Forbidden">
+  Configures how the tool supports task-based invocation:
+  - `Forbidden`: Clients must not invoke the tool as a task
+  - `Optional`: Clients may invoke as a task or normal request
+  - `Required`: Clients must invoke as a task
+  
+  **Note:** This is an experimental feature.
+</ParamField>
+
+### Parameter Binding
+
+Tool method parameters are bound from various sources:
+
+**Automatically Bound (not in JSON schema):**
+- `CancellationToken` - Bound to request cancellation token (respects client cancellation notifications)
+- `IServiceProvider` - Bound from the request context
+- `McpServer` - Bound to the server instance
+- `IProgress<ProgressNotificationValue>` - For reporting progress to the client
+- Services from DI (checked via `IServiceProviderIsService`)
+- Parameters with `[FromKeyedServices]` attribute
+
+**From Client Arguments:**
+- All other parameters are deserialized from `CallToolRequestParams.Arguments` dictionary using JSON
+
+<Note>
+  Data from client arguments should be considered unvalidated and untrusted. Always validate input within your tool method. Data annotations like `[Required]` and `[MaxLength]` influence the JSON schema but are not enforced at runtime.
+</Note>
+
+### Return Value Handling
+
+Tool return values are automatically converted to `CallToolResult`:
+
+| Return Type | Result |
+|-------------|--------|
+| `null` | Empty `Content` list |
+| `string` | Single `TextContentBlock` |
+| `AIContent` | Converted to `ContentBlock` |
+| `ContentBlock` | Single-item list |
+| `IEnumerable<string>` | Multiple `TextContentBlock` items |
+| `IEnumerable<AIContent>` | Multiple `ContentBlock` items |
+| `IEnumerable<ContentBlock>` | Returned as-is |
+| `CallToolResult` | Returned directly |
+| Other types | Serialized to JSON as text content |
+
+### Error Handling
+
+- Throw `McpException` to return an error with a specific message to the client
+- Throw any other exception to return a generic error (prevents leaking sensitive information)
+- Return `CallToolResult` with `IsError = true` for full control over error responses
+
+### Examples
+
+<CodeGroup>
+```csharp Basic Tool
+[McpServerToolType]
+public class AddTool
+{
+    [McpServerTool(Name = "add", IconSource = "https://example.com/plus.svg")]
+    [Description("Adds two numbers.")]
+    public static string Add(int a, int b) => $"The sum of {a} and {b} is {a + b}";
+}
+```
+
+```csharp With DI
+[McpServerToolType]
+public class WeatherTools
+{
+    [McpServerTool(ReadOnly = true)]
+    [Description("Get current weather for a city")]
+    public async Task<string> GetWeather(
+        [Description("City name")] string city,
+        IWeatherService weatherService,  // Injected from DI
+        CancellationToken cancellationToken)
+    {
+        return await weatherService.GetWeatherAsync(city, cancellationToken);
+    }
+}
+```
+
+```csharp With Progress
+[McpServerTool]
+[Description("Process a large file")]
+public async Task<string> ProcessFile(
+    string filePath,
+    IProgress<ProgressNotificationValue> progress,
+    CancellationToken cancellationToken)
+{
+    progress.Report(new ProgressNotificationValue { Progress = 25, Total = 100 });
+    // ... processing ...
+    progress.Report(new ProgressNotificationValue { Progress = 100, Total = 100 });
+    return "Processing complete";
+}
+```
+
+```csharp Error Handling
+[McpServerTool]
+[Description("Divide two numbers")]
+public static double Divide(double a, double b)
+{
+    if (b == 0)
+        throw new McpException("Cannot divide by zero");
+    return a / b;
+}
+```
+</CodeGroup>
+
+## McpServerPromptAttribute
+
+### Purpose
+
+Indicates that a method should be exposed as an MCP prompt that clients can retrieve.
+
+### Syntax
+
+```csharp
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class McpServerPromptAttribute : Attribute
+```
+
+### Properties
+
+<ParamField path="Name" type="string">
+  The name of the prompt. If null, the method name is used.
+</ParamField>
+
+<ParamField path="Title" type="string">
+  The title of the prompt for display purposes.
+</ParamField>
+
+<ParamField path="IconSource" type="string">
+  The source URI for the prompt's icon. Can be an HTTP/HTTPS URL or data URI. For advanced configuration, use `McpServerPromptCreateOptions.Icons`.
+</ParamField>
+
+### Parameter Binding
+
+**Automatically Bound:**
+- `CancellationToken`
+- `IServiceProvider`
+- `McpServer`
+- `IProgress<ProgressNotificationValue>`
+- Services from DI
+- Parameters with `[FromKeyedServices]`
+
+**From Client Arguments:**
+- Deserialized from `GetPromptRequestParams.Arguments` dictionary
+
+<Note>
+  Parameters of type `string` decorated with `[AllowedValues]` automatically get their allowed values surfaced as completions in response to `completion/complete` requests.
+</Note>
+
+### Return Value Handling
+
+| Return Type | Result |
+|-------------|--------|
+| `string` | Single `PromptMessage` with the string as content |
+| `PromptMessage` | Single-item list |
+| `IEnumerable<PromptMessage>` | Returned as-is |
+| `ChatMessage` | Converted to `PromptMessage` list |
+| `IEnumerable<ChatMessage>` | Converted to `PromptMessage` list |
+| Other types | Throws `InvalidOperationException` |
+
+### Examples
+
+<CodeGroup>
+```csharp Simple Prompt
+[McpServerPromptType]
+public class SimplePromptType
+{
+    [McpServerPrompt(Name = "simple_prompt", IconSource = "https://example.com/lightbulb.svg")]
+    [Description("A prompt without arguments")]
+    public static string SimplePrompt() => "This is a simple prompt without arguments";
+}
+```
+
+```csharp Parameterized Prompt
+[McpServerPrompt(Name = "code_review")]
+[Description("Generate a code review prompt")]
+public static PromptMessage CodeReview(
+    [Description("Programming language")] string language,
+    [Description("Complexity level")] string complexity)
+{
+    return new PromptMessage
+    {
+        Role = "user",
+        Content = new TextContentBlock
+        {
+            Text = $"Review this {language} code focusing on {complexity} level issues."
+        }
+    };
+}
+```
+
+```csharp With AllowedValues
+[McpServerPrompt]
+[Description("Generate prompt with style")]
+public static string StyledPrompt(
+    [AllowedValues("casual", "formal", "technical")]
+    [Description("Writing style")]
+    string style)
+{
+    return $"Write in {style} style: ";
+}
+// Clients can auto-complete the 'style' parameter with: casual, formal, technical
+```
+</CodeGroup>
+
+## McpServerResourceAttribute
+
+### Purpose
+
+Indicates that a method or property should be exposed as an MCP resource that clients can read.
+
+### Syntax
+
+```csharp
+[AttributeUsage(AttributeTargets.Method)]
+public sealed class McpServerResourceAttribute : Attribute
+```
+
+### Properties
+
+<ParamField path="UriTemplate" type="string">
+  The URI template of the resource (RFC 6570 format). If null, derived from `Name` and method parameters.
+  
+  - **With parameters** (e.g., `"test://template/resource/{id}"`) - Resource template listed with `resources/templates/list`
+  - **Without parameters** (e.g., `"test://direct/resource"`) - Direct resource listed with `resources/list`
+</ParamField>
+
+<ParamField path="Name" type="string">
+  The name of the resource. If null, the method name is used.
+</ParamField>
+
+<ParamField path="Title" type="string">
+  The title of the resource for display purposes.
+</ParamField>
+
+<ParamField path="MimeType" type="string">
+  The MIME (media) type of the resource (e.g., `"text/plain"`, `"application/json"`).
+</ParamField>
+
+<ParamField path="IconSource" type="string">
+  The source URI for the resource's icon. For advanced configuration, use `McpServerResourceCreateOptions.Icons`.
+</ParamField>
+
+### Parameter Binding
+
+**Automatically Bound:**
+- `CancellationToken`
+- `IServiceProvider`
+- `McpServer`
+- `IProgress<ProgressNotificationValue>`
+- Services from DI
+- Parameters with `[FromKeyedServices]`
+
+**From URI Template:**
+- All other parameters are bound from the URI using the template pattern
+
+<Note>
+  Parameters of type `string` decorated with `[AllowedValues]` automatically surface completions for `completion/complete` requests.
+</Note>
+
+### Return Value Handling
+
+| Return Type | Result |
+|-------------|--------|
+| `ResourceContents` | Single-item list |
+| `TextContentBlock` | Converted to `TextResourceContents` |
+| `DataContent` | Converted to `BlobResourceContents` |
+| `string` | Converted to `TextResourceContents` |
+| `IEnumerable<ResourceContents>` | Returned as-is |
+| `IEnumerable<AIContent>` | Converted to appropriate `ResourceContents` types |
+| `IEnumerable<string>` | Each string as `TextResourceContents` |
+| Other types | Throws `InvalidOperationException` |
+
+### Examples
+
+<CodeGroup>
+```csharp Direct Resource
+[McpServerResourceType]
+public class SimpleResourceType
+{
+    [McpServerResource(
+        UriTemplate = "test://direct/text/resource", 
+        Name = "Direct Text Resource",
+        MimeType = "text/plain",
+        IconSource = "https://example.com/memo.svg")]
+    [Description("A direct text resource")]
+    public static string DirectTextResource() => "This is a direct resource";
+}
+```
+
+```csharp Template Resource
+[McpServerResource(
+    UriTemplate = "test://template/resource/{id}", 
+    Name = "Template Resource")]
+[Description("A template resource with a numeric ID")]
+public static ResourceContents TemplateResource(
+    RequestContext<ReadResourceRequestParams> requestContext, 
+    int id)
+{
+    var resource = GetResourceById(id);
+    return new TextResourceContents
+    {
+        Text = resource.Content,
+        MimeType = "text/plain",
+        Uri = $"test://template/resource/{id}"
+    };
+}
+```
+
+```csharp Binary Resource
+[McpServerResource(
+    UriTemplate = "file://images/{filename}",
+    MimeType = "image/png")]
+public static BlobResourceContents GetImage(string filename)
+{
+    var bytes = File.ReadAllBytes($"./images/{filename}");
+    return new BlobResourceContents
+    {
+        Blob = bytes,
+        MimeType = "image/png",
+        Uri = $"file://images/{filename}"
+    };
+}
+```
+</CodeGroup>
+
+## Type Attributes
+
+These attributes mark classes for automatic discovery when using assembly scanning methods.
+
+### McpServerToolTypeAttribute
+
+```csharp
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class McpServerToolTypeAttribute : Attribute;
+```
+
+Marks a class containing methods with `[McpServerTool]`. Used with `WithToolsFromAssembly()`.
+
+```csharp
+[McpServerToolType]
+public class MyTools
+{
+    [McpServerTool]
+    public static string Tool1() => "Result";
+    
+    [McpServerTool]
+    public static string Tool2() => "Result";
+}
+
+// Discovery
+builder.Services.AddMcpServer()
+    .WithToolsFromAssembly();  // Discovers MyTools automatically
+```
+
+### McpServerPromptTypeAttribute
+
+```csharp
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class McpServerPromptTypeAttribute : Attribute;
+```
+
+Marks a class containing methods with `[McpServerPrompt]`. Used with `WithPromptsFromAssembly()`.
+
+### McpServerResourceTypeAttribute
+
+```csharp
+[AttributeUsage(AttributeTargets.Class)]
+public sealed class McpServerResourceTypeAttribute : Attribute;
+```
+
+Marks a class containing members with `[McpServerResource]`. Used with `WithResourcesFromAssembly()`.
+
+## Best Practices
+
+### Descriptions
+
+Always provide clear `[Description]` attributes on methods and parameters. These descriptions are surfaced to AI models and help them understand when and how to use your tools.
+
+```csharp
+[McpServerTool]
+[Description("Retrieves the current weather conditions for a specified city")]
+public async Task<string> GetWeather(
+    [Description("The name of the city (e.g., 'London', 'New York')")] string city,
+    CancellationToken cancellationToken)
+{
+    // Implementation
+}
+```
+
+### Validation
+
+Validate all client-provided input explicitly:
+
+```csharp
+[McpServerTool]
+public static string ProcessData(string input)
+{
+    if (string.IsNullOrWhiteSpace(input))
+        throw new McpException("Input cannot be empty");
+    
+    if (input.Length > 1000)
+        throw new McpException("Input exceeds maximum length of 1000 characters");
+    
+    return Process(input);
+}
+```
+
+### Security
+
+Use dependency injection to provide trusted data rather than accepting it from client arguments:
+
+```csharp
+public class SecureTools
+{
+    private readonly IConfiguration _config;
+    
+    public SecureTools(IConfiguration config)
+    {
+        _config = config;  // Trusted source
+    }
+    
+    [McpServerTool]
+    public string GetData(string query)  // Only 'query' comes from client
+    {
+        var apiKey = _config["ApiKey"];  // From trusted config
+        return CallApi(apiKey, query);
+    }
+}
+```
+
+## See Also
+
+- [IMcpServerBuilder](/api/main/server-builder) - Builder methods that discover these attributes
+- [Hosting and DI](/api/main/hosting) - How to register attributed types
+- [Protocol Types](/api/core/protocol-types) - The Tool, Prompt, and Resource types created from attributed methods

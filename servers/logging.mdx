@@ -1,0 +1,462 @@
+---
+title: Server Logging
+description: Implement MCP server logging capabilities
+---
+
+The MCP protocol includes logging capabilities that allow servers to send log messages to clients. The C# SDK provides built-in support for logging levels and notifications.
+
+## Overview
+
+MCP logging enables:
+
+- Servers to send diagnostic information to clients
+- Clients to control server logging verbosity
+- Structured log messages with levels
+- Real-time log streaming during operations
+
+## Logging Levels
+
+The MCP protocol defines eight logging levels (aligned with syslog):
+
+```csharp
+public enum LoggingLevel
+{
+    Debug,      // Detailed debug information
+    Info,       // General informational messages
+    Notice,     // Normal but significant events
+    Warning,    // Warning conditions
+    Error,      // Error conditions
+    Critical,   // Critical conditions
+    Alert,      // Action must be taken immediately
+    Emergency   // System is unusable
+}
+```
+
+## Setting Logging Level Handler
+
+Implement a handler to respond to client logging level changes:
+
+```csharp Program.cs
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithSetLoggingLevelHandler(async (ctx, ct) =>
+    {
+        if (ctx.Params?.Level is null)
+        {
+            throw new McpProtocolException(
+                "Missing required argument 'level'",
+                McpErrorCode.InvalidParams);
+        }
+
+        // The SDK automatically updates ctx.Server.LoggingLevel
+        
+        // Optionally notify about the change
+        await ctx.Server.SendNotificationAsync(
+            "notifications/message",
+            new
+            {
+                Level = "info",
+                Logger = "my-server",
+                Data = $"Logging level set to {ctx.Params.Level}"
+            },
+            cancellationToken: ct);
+
+        return new EmptyResult();
+    });
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+## Sending Log Messages
+
+Send log messages to clients using the `notifications/message` notification:
+
+```csharp
+public class MyService
+{
+    private readonly McpServer _server;
+
+    public MyService(McpServer server)
+    {
+        _server = server;
+    }
+
+    public async Task DoWorkAsync()
+    {
+        // Send an info message
+        await _server.SendNotificationAsync(
+            "notifications/message",
+            new
+            {
+                Level = "info",
+                Logger = "my-service",
+                Data = "Starting work operation"
+            });
+
+        try
+        {
+            // Do work...
+            
+            await _server.SendNotificationAsync(
+                "notifications/message",
+                new
+                {
+                    Level = "debug",
+                    Logger = "my-service",
+                    Data = "Processing item 1 of 10"
+                });
+        }
+        catch (Exception ex)
+        {
+            // Send an error message
+            await _server.SendNotificationAsync(
+                "notifications/message",
+                new
+                {
+                    Level = "error",
+                    Logger = "my-service",
+                    Data = $"Operation failed: {ex.Message}"
+                });
+            throw;
+        }
+    }
+}
+```
+
+## Respecting Client Logging Level
+
+Only send messages at or above the client's configured level:
+
+```csharp
+public class LoggingService
+{
+    private readonly McpServer _server;
+
+    public async Task LogAsync(
+        LoggingLevel level,
+        string logger,
+        string message,
+        CancellationToken cancellationToken = default)
+    {
+        // Only send if the message level is at or above the client's level
+        if (level >= _server.LoggingLevel)
+        {
+            await _server.SendNotificationAsync(
+                "notifications/message",
+                new
+                {
+                    Level = level.ToString().ToLower(),
+                    Logger = logger,
+                    Data = message
+                },
+                cancellationToken: cancellationToken);
+        }
+    }
+}
+```
+
+## Background Logging Service
+
+Implement a background service for continuous logging:
+
+```csharp LoggingUpdateMessageSender.cs
+using Microsoft.Extensions.Hosting;
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+
+public class LoggingUpdateMessageSender : BackgroundService
+{
+    private readonly McpServer _server;
+    
+    private readonly Dictionary<LoggingLevel, string> _loggingLevelMap = new()
+    {
+        { LoggingLevel.Debug, "Debug-level message" },
+        { LoggingLevel.Info, "Info-level message" },
+        { LoggingLevel.Notice, "Notice-level message" },
+        { LoggingLevel.Warning, "Warning-level message" },
+        { LoggingLevel.Error, "Error-level message" },
+        { LoggingLevel.Critical, "Critical-level message" },
+        { LoggingLevel.Alert, "Alert-level message" },
+        { LoggingLevel.Emergency, "Emergency-level message" }
+    };
+
+    public LoggingUpdateMessageSender(McpServer server)
+    {
+        _server = server;
+    }
+
+    protected override async Task ExecuteAsync(CancellationToken stoppingToken)
+    {
+        while (!stoppingToken.IsCancellationRequested)
+        {
+            // Generate a random log level
+            var msgLevel = (LoggingLevel)Random.Shared.Next(_loggingLevelMap.Count);
+
+            var message = new
+            {
+                Level = msgLevel.ToString().ToLower(),
+                Data = _loggingLevelMap[msgLevel],
+            };
+
+            // Only send if level is at or above client's configured level
+            if (msgLevel >= _server.LoggingLevel)
+            {
+                await _server.SendNotificationAsync(
+                    "notifications/message",
+                    message,
+                    cancellationToken: stoppingToken);
+            }
+
+            await Task.Delay(15000, stoppingToken);
+        }
+    }
+}
+```
+
+Register the background service:
+
+```csharp Program.cs
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.RunSessionHandler = async (httpContext, mcpServer, token) =>
+        {
+            // Start logging service for this session
+            using var loggingSender = new LoggingUpdateMessageSender(mcpServer);
+            await loggingSender.StartAsync(token);
+            
+            await mcpServer.RunAsync(token);
+        };
+    });
+```
+
+## Structured Log Messages
+
+Include structured data in log messages:
+
+```csharp
+await _server.SendNotificationAsync(
+    "notifications/message",
+    new
+    {
+        Level = "info",
+        Logger = "database-service",
+        Data = new
+        {
+            Message = "Query executed successfully",
+            Duration = 125,
+            RowsAffected = 42,
+            QueryId = "abc123"
+        }
+    });
+```
+
+## Integration with ILogger
+
+Bridge MCP logging with .NET's `ILogger`:
+
+```csharp
+public class McpLoggerAdapter
+{
+    private readonly McpServer _server;
+    private readonly string _categoryName;
+
+    public McpLoggerAdapter(McpServer server, string categoryName)
+    {
+        _server = server;
+        _categoryName = categoryName;
+    }
+
+    public async Task LogAsync(
+        Microsoft.Extensions.Logging.LogLevel logLevel,
+        string message,
+        Exception? exception = null)
+    {
+        var mcpLevel = MapLogLevel(logLevel);
+        
+        if (mcpLevel < _server.LoggingLevel)
+        {
+            return;
+        }
+
+        var data = exception != null
+            ? $"{message}: {exception.Message}"
+            : message;
+
+        await _server.SendNotificationAsync(
+            "notifications/message",
+            new
+            {
+                Level = mcpLevel.ToString().ToLower(),
+                Logger = _categoryName,
+                Data = data
+            });
+    }
+
+    private static LoggingLevel MapLogLevel(Microsoft.Extensions.Logging.LogLevel logLevel)
+    {
+        return logLevel switch
+        {
+            Microsoft.Extensions.Logging.LogLevel.Trace => LoggingLevel.Debug,
+            Microsoft.Extensions.Logging.LogLevel.Debug => LoggingLevel.Debug,
+            Microsoft.Extensions.Logging.LogLevel.Information => LoggingLevel.Info,
+            Microsoft.Extensions.Logging.LogLevel.Warning => LoggingLevel.Warning,
+            Microsoft.Extensions.Logging.LogLevel.Error => LoggingLevel.Error,
+            Microsoft.Extensions.Logging.LogLevel.Critical => LoggingLevel.Critical,
+            _ => LoggingLevel.Info
+        };
+    }
+}
+```
+
+## Logging from Tools
+
+Log from within tool implementations:
+
+```csharp
+[McpServerToolType]
+public class DiagnosticTools
+{
+    [McpServerTool]
+    [Description("Run diagnostics with detailed logging")]
+    public static async Task<string> RunDiagnostics(
+        McpServer server,
+        [Description("Diagnostic test to run")] string testName)
+    {
+        await server.SendNotificationAsync(
+            "notifications/message",
+            new
+            {
+                Level = "info",
+                Logger = "diagnostic-tool",
+                Data = $"Starting diagnostic: {testName}"
+            });
+
+        try
+        {
+            // Run diagnostic...
+            await Task.Delay(1000);
+            
+            await server.SendNotificationAsync(
+                "notifications/message",
+                new
+                {
+                    Level = "debug",
+                    Logger = "diagnostic-tool",
+                    Data = "Step 1 completed"
+                });
+
+            return "Diagnostics completed successfully";
+        }
+        catch (Exception ex)
+        {
+            await server.SendNotificationAsync(
+                "notifications/message",
+                new
+                {
+                    Level = "error",
+                    Logger = "diagnostic-tool",
+                    Data = $"Diagnostic failed: {ex.Message}"
+                });
+            throw;
+        }
+    }
+}
+```
+
+## Message Format
+
+Log notification structure:
+
+<ParamField path="Level" type="string" required>
+  Log level as lowercase string: "debug", "info", "notice", "warning", "error", "critical", "alert", or "emergency".
+</ParamField>
+
+<ParamField path="Logger" type="string">
+  Name of the logger or component generating the message.
+</ParamField>
+
+<ParamField path="Data" type="string | object" required>
+  The log message content. Can be a string or structured object.
+</ParamField>
+
+## Best Practices
+
+<Steps>
+  <Step title="Respect Client Level">
+    Always check `server.LoggingLevel` before sending messages to avoid unnecessary network traffic.
+  </Step>
+
+  <Step title="Use Appropriate Levels">
+    Choose the correct logging level for each message. Reserve higher levels (error, critical, alert) for serious issues.
+  </Step>
+
+  <Step title="Include Context">
+    Set meaningful `Logger` values to help clients filter and categorize messages.
+  </Step>
+
+  <Step title="Structure Data">
+    For complex information, use structured objects instead of string interpolation.
+  </Step>
+
+  <Step title="Don't Block Operations">
+    Send notifications asynchronously without blocking tool or resource operations.
+  </Step>
+</Steps>
+
+## Complete Example
+
+From the EverythingServer sample:
+
+```csharp Program.cs
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.RunSessionHandler = async (httpContext, mcpServer, token) =>
+        {
+            // Start logging service
+            using var loggingSender = new LoggingUpdateMessageSender(mcpServer);
+            await loggingSender.StartAsync(token);
+            
+            await mcpServer.RunAsync(token);
+        };
+    })
+    .WithSetLoggingLevelHandler(async (ctx, ct) =>
+    {
+        if (ctx.Params?.Level is null)
+        {
+            throw new McpProtocolException(
+                "Missing required argument 'level'",
+                McpErrorCode.InvalidParams);
+        }
+
+        // SDK updates ctx.Server.LoggingLevel automatically
+
+        await ctx.Server.SendNotificationAsync(
+            "notifications/message",
+            new
+            {
+                Level = "debug",
+                Logger = "everything-server",
+                Data = $"Logging level set to {ctx.Params.Level}"
+            },
+            cancellationToken: ct);
+
+        return new EmptyResult();
+    });
+```
+
+## Next Steps
+
+- Learn about [Tools](/servers/tools) for executable functions
+- Explore [Filters](/servers/filters) for cross-cutting concerns
+- Build [ASP.NET Core servers](/servers/aspnetcore) with HTTP transport

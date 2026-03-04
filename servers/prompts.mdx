@@ -1,0 +1,446 @@
+---
+title: Implementing Prompts
+description: Build MCP server prompts with the [McpServerPrompt] attribute
+---
+
+Prompts are reusable prompt templates that MCP servers expose to clients. They allow pre-configured prompt patterns to be shared and invoked with different parameters.
+
+## Basic Prompt Implementation
+
+Use the `[McpServerPrompt]` attribute to mark methods as MCP prompts:
+
+```csharp SimplePromptType.cs
+using ModelContextProtocol.Server;
+using System.ComponentModel;
+
+[McpServerPromptType]
+public class SimplePromptType
+{
+    [McpServerPrompt(
+        Name = "simple_prompt",
+        IconSource = "https://example.com/lightbulb.svg"
+    )]
+    [Description("A prompt without arguments")]
+    public static string SimplePrompt() => "This is a simple prompt without arguments";
+}
+```
+
+## Registering Prompts
+
+Register prompt types with the MCP server builder:
+
+```csharp Program.cs
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithPrompts<SimplePromptType>();
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+## Prompt Attribute Properties
+
+<ParamField path="Name" type="string">
+  The prompt's name. If null, the method name is used.
+</ParamField>
+
+<ParamField path="Title" type="string">
+  A human-readable title for the prompt.
+</ParamField>
+
+<ParamField path="IconSource" type="string">
+  URI for the prompt's icon (HTTP/HTTPS URL or data URI).
+</ParamField>
+
+## Prompts with Arguments
+
+Prompts can accept parameters for dynamic content:
+
+```csharp ComplexPromptType.cs
+using Microsoft.Extensions.AI;
+using ModelContextProtocol.Server;
+using System.ComponentModel;
+
+[McpServerPromptType]
+public class ComplexPromptType
+{
+    [McpServerPrompt(Name = "complex_prompt")]
+    [Description("A prompt with arguments")]
+    public static IEnumerable<ChatMessage> ComplexPrompt(
+        [Description("Temperature setting")] int temperature,
+        [Description("Output style")] string? style = null)
+    {
+        return [
+            new ChatMessage(
+                ChatRole.User,
+                $"This is a complex prompt with arguments: temperature={temperature}, style={style}"
+            ),
+            new ChatMessage(
+                ChatRole.Assistant,
+                "I understand. You've provided a complex prompt with temperature and style arguments. How would you like me to proceed?"
+            )
+        ];
+    }
+}
+```
+
+## Return Types
+
+The SDK converts various return types to `GetPromptResult`:
+
+<CodeGroup>
+```csharp String
+[McpServerPrompt]
+public static string GetPrompt() => "Write a detailed analysis of...";
+// Converted to PromptMessage with user role
+```
+
+```csharp PromptMessage
+[McpServerPrompt]
+public static PromptMessage GetPromptMessage()
+{
+    return new PromptMessage
+    {
+        Role = Role.User,
+        Content = new TextContentBlock { Text = "Analyze this data:" }
+    };
+}
+```
+
+```csharp Multiple Messages
+[McpServerPrompt]
+public static IEnumerable<PromptMessage> GetConversation()
+{
+    return [
+        new PromptMessage
+        {
+            Role = Role.User,
+            Content = new TextContentBlock { Text = "What is the capital of France?" }
+        },
+        new PromptMessage
+        {
+            Role = Role.Assistant,
+            Content = new TextContentBlock { Text = "The capital of France is Paris." }
+        },
+        new PromptMessage
+        {
+            Role = Role.User,
+            Content = new TextContentBlock { Text = "Tell me more about it." }
+        }
+    ];
+}
+```
+
+```csharp ChatMessage (Microsoft.Extensions.AI)
+[McpServerPrompt]
+public static IEnumerable<ChatMessage> GetChatMessages(string topic)
+{
+    return [
+        new ChatMessage(ChatRole.System, "You are a helpful assistant."),
+        new ChatMessage(ChatRole.User, $"Explain {topic} in simple terms.")
+    ];
+}
+```
+</CodeGroup>
+
+## Multi-Modal Prompts
+
+Prompts can include images and other content types:
+
+```csharp
+using Microsoft.Extensions.AI;
+
+[McpServerPrompt]
+[Description("Analyze an image with context")]
+public static IEnumerable<ChatMessage> AnalyzeImage(
+    [Description("Analysis instructions")] string instructions)
+{
+    // Base64-encoded tiny image for demonstration
+    const string tinyImage = "data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==";
+    
+    return [
+        new ChatMessage(ChatRole.User, [
+            new TextContent(instructions),
+            new DataContent(tinyImage, "image/png")
+        ])
+    ];
+}
+```
+
+## Parameter Binding
+
+### From Arguments
+
+Prompt parameters are deserialized from `GetPromptRequestParams.Arguments`:
+
+```csharp
+[McpServerPrompt]
+[Description("Generate a code review prompt")]
+public static string CodeReviewPrompt(
+    [Description("Programming language")] string language,
+    [Description("Code complexity level")] string level = "intermediate",
+    [Description("Focus areas")] string[]? focusAreas = null)
+{
+    var focus = focusAreas != null ? string.Join(", ", focusAreas) : "general quality";
+    return $"Review this {language} code at {level} level, focusing on: {focus}";
+}
+```
+
+### Special Parameter Types
+
+Like tools and resources, prompts support special parameter types:
+
+<Steps>
+  <Step title="McpServer">
+    Access the server instance:
+    ```csharp
+    [McpServerPrompt]
+    public static string ServerAwarePrompt(McpServer server, string topic)
+    {
+        return $"Session {server.SessionId}: Discuss {topic}";
+    }
+    ```
+  </Step>
+
+  <Step title="RequestContext<GetPromptRequestParams>">
+    Access the full request context:
+    ```csharp
+    [McpServerPrompt]
+    public static string ContextualPrompt(
+        RequestContext<GetPromptRequestParams> context,
+        string topic)
+    {
+        var promptName = context.Params?.Name;
+        return $"Using prompt '{promptName}' to discuss {topic}";
+    }
+    ```
+  </Step>
+
+  <Step title="IServiceProvider">
+    Resolve services from dependency injection:
+    ```csharp
+    [McpServerPrompt]
+    public static string DynamicPrompt(
+        IServiceProvider services,
+        string topic)
+    {
+        var config = services.GetRequiredService<IConfiguration>();
+        var model = config["DefaultModel"];
+        return $"[Using {model}] Explain {topic}";
+    }
+    ```
+  </Step>
+
+  <Step title="CancellationToken">
+    Support cancellation:
+    ```csharp
+    [McpServerPrompt]
+    public static async Task<string> AsyncPrompt(
+        string topic,
+        CancellationToken cancellationToken)
+    {
+        await Task.Delay(100, cancellationToken);
+        return $"Discuss {topic}";
+    }
+    ```
+  </Step>
+</Steps>
+
+## Instance Methods with Dependencies
+
+Use instance methods for prompts that need services:
+
+```csharp
+[McpServerPromptType]
+public class DynamicPrompts
+{
+    private readonly IConfiguration _configuration;
+    private readonly ILogger<DynamicPrompts> _logger;
+
+    public DynamicPrompts(
+        IConfiguration configuration,
+        ILogger<DynamicPrompts> logger)
+    {
+        _configuration = configuration;
+        _logger = logger;
+    }
+
+    [McpServerPrompt]
+    [Description("Generate a prompt with custom instructions")]
+    public IEnumerable<ChatMessage> GetCustomPrompt(
+        [Description("Task description")] string task)
+    {
+        var systemInstructions = _configuration["SystemInstructions"];
+        _logger.LogInformation("Generating prompt for task: {Task}", task);
+        
+        return [
+            new ChatMessage(ChatRole.System, systemInstructions),
+            new ChatMessage(ChatRole.User, task)
+        ];
+    }
+}
+```
+
+## Prompt Templates with Roles
+
+Structure prompts as conversations:
+
+```csharp
+[McpServerPrompt]
+[Description("Expert system prompt for technical analysis")]
+public static IEnumerable<PromptMessage> ExpertAnalysis(
+    [Description("Domain expertise required")] string domain,
+    [Description("Question to analyze")] string question)
+{
+    return [
+        new PromptMessage
+        {
+            Role = Role.User,
+            Content = new TextContentBlock
+            {
+                Text = $"You are an expert in {domain}. Please analyze the following question with detailed technical insights."
+            }
+        },
+        new PromptMessage
+        {
+            Role = Role.Assistant,
+            Content = new TextContentBlock
+            {
+                Text = "I understand. I'll provide a detailed technical analysis drawing on my expertise. What would you like me to analyze?"
+            }
+        },
+        new PromptMessage
+        {
+            Role = Role.User,
+            Content = new TextContentBlock
+            {
+                Text = question
+            }
+        }
+    ];
+}
+```
+
+## Prompt Metadata
+
+Add custom metadata to prompts:
+
+```csharp
+[McpServerPrompt(Name = "code_review")]
+[McpMeta("category", "development")]
+[McpMeta("difficulty", "intermediate")]
+[McpMeta("estimatedTokens", 500.0)]
+[Description("Code review prompt template")]
+public static string CodeReview(
+    string language,
+    string complexity)
+{
+    return $"Review this {language} code at {complexity} level";
+}
+```
+
+## Advanced Configuration
+
+### Programmatic Prompt Creation
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithPrompts([
+        McpServerPrompt.Create(
+            typeof(MyPrompts).GetMethod(nameof(MyPrompts.CustomPrompt))!,
+            options: new McpServerPromptCreateOptions
+            {
+                Icons = [
+                    new Icon
+                    {
+                        Source = "https://example.com/icon.svg",
+                        MimeType = "image/svg+xml",
+                        Theme = "light"
+                    }
+                ]
+            })
+    ]);
+```
+
+### Multiple Registration Methods
+
+```csharp
+// Register by type
+.WithPrompts<MyPrompts>()
+
+// Register from assembly
+.WithPromptsFromAssembly()
+
+// Register from types collection
+.WithPrompts([typeof(Prompt1), typeof(Prompt2)])
+
+// Register with custom serializer
+.WithPrompts<CustomPrompts>(serializerOptions)
+```
+
+## Prompt Argument Completions
+
+Provide suggestions for prompt arguments using the completion handler:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithPrompts<MyPrompts>()
+    .WithCompleteHandler(async (ctx, ct) =>
+    {
+        if (ctx.Params?.Ref is PromptReference pr)
+        {
+            var argument = ctx.Params.Argument;
+            
+            if (argument.Name == "style")
+            {
+                var values = new[] { "casual", "formal", "technical", "friendly" }
+                    .Where(v => v.StartsWith(argument.Value));
+                
+                return new CompleteResult
+                {
+                    Completion = new Completion
+                    {
+                        Values = values.ToList(),
+                        HasMore = false,
+                        Total = values.Count()
+                    }
+                };
+            }
+        }
+        
+        return new CompleteResult();
+    });
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Design Clear Prompt Templates">
+    Create prompts that serve specific, well-defined purposes. Use descriptive names and provide clear parameter descriptions.
+  </Step>
+
+  <Step title="Use System Messages">
+    Include system messages to set context and behavior expectations for AI models.
+  </Step>
+
+  <Step title="Structure Conversations">
+    For complex prompts, structure them as conversations with alternating user/assistant messages to guide the interaction.
+  </Step>
+
+  <Step title="Validate Parameters">
+    Validate input parameters to ensure prompts are generated with appropriate values.
+  </Step>
+
+  <Step title="Support Multi-Modal Content">
+    When appropriate, include images or other content types to enrich prompts.
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Learn about [Tools](/servers/tools) for executable functions
+- Explore [Resources](/servers/resources) for exposing data
+- Add [Completions](/servers/completions) for argument suggestions

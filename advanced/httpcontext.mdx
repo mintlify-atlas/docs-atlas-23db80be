@@ -1,0 +1,315 @@
+---
+title: Accessing HttpContext
+description: Access HTTP request metadata in MCP server handlers
+---
+
+When using the Streamable HTTP transport, MCP servers often need access to the underlying HTTP request context. The `HttpContext` provides request metadata including headers, user identity, route data, and more.
+
+## Basic Setup
+
+To access `HttpContext` in your MCP server tools or handlers:
+
+<Steps>
+  <Step title="Register IHttpContextAccessor">
+    Add the `IHttpContextAccessor` service to your application (typically in `Program.cs`):
+
+    ```csharp ~/workspace/source/docs/concepts/httpcontext/samples/Program.cs
+    builder.Services.AddHttpContextAccessor();
+    ```
+  </Step>
+
+  <Step title="Inject in your tool class">
+    Accept `IHttpContextAccessor` in your tool class constructor:
+
+    ```csharp
+    [McpServerToolType]
+    public class MyTools(IHttpContextAccessor httpContextAccessor)
+    {
+        private readonly IHttpContextAccessor _httpContextAccessor = httpContextAccessor;
+    }
+    ```
+  </Step>
+
+  <Step title="Access the current context">
+    Use the `HttpContext` property to get the current request context:
+
+    ```csharp
+    var context = _httpContextAccessor.HttpContext;
+    if (context != null)
+    {
+        // Access request information
+    }
+    ```
+  </Step>
+</Steps>
+
+## Complete Example
+
+Here's a complete example that retrieves HTTP headers from the current request:
+
+```csharp ~/workspace/source/docs/concepts/httpcontext/samples/Tools/ContextTools.cs
+using ModelContextProtocol.Server;
+using System.ComponentModel;
+
+namespace HttpContext.Tools;
+
+public class ContextTools(IHttpContextAccessor httpContextAccessor)
+{
+    [McpServerTool(UseStructuredContent = true)]
+    [Description("Retrieves the HTTP headers from the current request and returns them as a JSON object.")]
+    public object GetHttpHeaders()
+    {
+        var context = httpContextAccessor.HttpContext;
+        if (context == null)
+        {
+            return "No HTTP context available";
+        }
+
+        var headers = new Dictionary<string, string>();
+        foreach (var header in context.Request.Headers)
+        {
+            headers[header.Key] = string.Join(", ", header.Value.ToArray());
+        }
+
+        return headers;
+    }
+}
+```
+
+## Common Use Cases
+
+### Accessing Request Headers
+
+Retrieve specific headers from the current request:
+
+```csharp
+[McpServerTool]
+[Description("Gets the user agent from the request")]
+public string GetUserAgent(IHttpContextAccessor httpContextAccessor)
+{
+    var context = httpContextAccessor.HttpContext;
+    if (context == null) return "No context available";
+
+    var userAgent = context.Request.Headers["User-Agent"].FirstOrDefault();
+    return userAgent ?? "No User-Agent header found";
+}
+```
+
+### Accessing User Identity
+
+Retrieve authenticated user information:
+
+```csharp
+[McpServerToolType]
+public class UserTools(IHttpContextAccessor httpContextAccessor)
+{
+    [McpServerTool]
+    [Description("Gets the current authenticated user name")]
+    public string GetCurrentUser()
+    {
+        var context = httpContextAccessor.HttpContext;
+        if (context?.User?.Identity?.IsAuthenticated == true)
+        {
+            return context.User.Identity.Name ?? "Unknown user";
+        }
+        return "Not authenticated";
+    }
+
+    [McpServerTool]
+    [Description("Gets all user claims")]
+    public Dictionary<string, string> GetUserClaims()
+    {
+        var context = httpContextAccessor.HttpContext;
+        if (context?.User == null) return new();
+
+        var claims = new Dictionary<string, string>();
+        foreach (var claim in context.User.Claims)
+        {
+            claims[claim.Type] = claim.Value;
+        }
+        return claims;
+    }
+}
+```
+
+### Accessing Request Path and Query
+
+Retrieve URL information:
+
+```csharp
+[McpServerTool]
+[Description("Gets request path and query string information")]
+public object GetRequestInfo(IHttpContextAccessor httpContextAccessor)
+{
+    var context = httpContextAccessor.HttpContext;
+    if (context == null) return "No context available";
+
+    return new
+    {
+        Path = context.Request.Path.Value,
+        QueryString = context.Request.QueryString.Value,
+        Method = context.Request.Method,
+        Scheme = context.Request.Scheme,
+        Host = context.Request.Host.Value
+    };
+}
+```
+
+### Accessing Remote IP Address
+
+Get the client's IP address:
+
+```csharp
+[McpServerTool]
+[Description("Gets the client IP address")]
+public string GetClientIp(IHttpContextAccessor httpContextAccessor)
+{
+    var context = httpContextAccessor.HttpContext;
+    if (context == null) return "No context available";
+
+    var remoteIp = context.Connection.RemoteIpAddress;
+    return remoteIp?.ToString() ?? "Unknown";
+}
+```
+
+### Custom Response Headers
+
+Add custom headers to the response:
+
+```csharp
+[McpServerTool]
+[Description("Performs an operation and sets custom response headers")]
+public string ProcessWithCustomHeaders(IHttpContextAccessor httpContextAccessor)
+{
+    var context = httpContextAccessor.HttpContext;
+    if (context != null)
+    {
+        context.Response.Headers.Add("X-Custom-Header", "CustomValue");
+        context.Response.Headers.Add("X-Processing-Time", DateTime.UtcNow.ToString("o"));
+    }
+
+    return "Processing complete with custom headers";
+}
+```
+
+## Advanced Scenarios
+
+### Per-Request Services
+
+Access services scoped to the current HTTP request:
+
+```csharp
+[McpServerToolType]
+public class AdvancedTools(IHttpContextAccessor httpContextAccessor)
+{
+    [McpServerTool]
+    [Description("Uses request-scoped services")]
+    public string UseRequestScopedService()
+    {
+        var context = httpContextAccessor.HttpContext;
+        if (context == null) return "No context available";
+
+        // Access request-scoped services
+        var scopedService = context.RequestServices.GetService<IMyScopedService>();
+        return scopedService?.DoWork() ?? "Service not available";
+    }
+}
+```
+
+### Session Data
+
+Access HTTP session data:
+
+```csharp
+[McpServerTool]
+[Description("Gets a value from session")]
+public string GetSessionValue(string key, IHttpContextAccessor httpContextAccessor)
+{
+    var context = httpContextAccessor.HttpContext;
+    if (context?.Session == null) return "Session not available";
+
+    var value = context.Session.GetString(key);
+    return value ?? $"No value found for key: {key}";
+}
+
+[McpServerTool]
+[Description("Sets a value in session")]
+public string SetSessionValue(string key, string value, IHttpContextAccessor httpContextAccessor)
+{
+    var context = httpContextAccessor.HttpContext;
+    if (context?.Session == null) return "Session not available";
+
+    context.Session.SetString(key, value);
+    return $"Session value set: {key} = {value}";
+}
+```
+
+### Request Body Access
+
+<Warning>
+  Accessing the request body through `HttpContext` in MCP tools is not recommended because the MCP framework already reads the body to deserialize the JSON-RPC request. Use tool parameters instead.
+</Warning>
+
+## Best Practices
+
+<Accordion title="Always check for null">
+  The `HttpContext` may be null in certain scenarios (testing, background tasks):
+
+  ```csharp
+  var context = httpContextAccessor.HttpContext;
+  if (context == null)
+  {
+      return "No HTTP context available";
+  }
+  ```
+</Accordion>
+
+<Accordion title="Use dependency injection">
+  Inject `IHttpContextAccessor` via constructor rather than using static access:
+
+  ```csharp
+  // ✅ Good: Constructor injection
+  public class MyTools(IHttpContextAccessor httpContextAccessor)
+
+  // ❌ Bad: Static or service locator patterns
+  ```
+</Accordion>
+
+<Accordion title="Avoid storing HttpContext">
+  Don't store `HttpContext` in fields or properties - always get it from the accessor when needed:
+
+  ```csharp
+  // ✅ Good: Get context when needed
+  var context = _httpContextAccessor.HttpContext;
+
+  // ❌ Bad: Store in field
+  private readonly HttpContext _context;
+  ```
+</Accordion>
+
+<Accordion title="Consider transport independence">
+  Code that relies on `HttpContext` won't work with non-HTTP transports (stdio, SSE). Consider making HTTP-specific features optional:
+
+  ```csharp
+  var context = httpContextAccessor.HttpContext;
+  if (context != null)
+  {
+      // HTTP-specific logic
+  }
+  else
+  {
+      // Fallback for non-HTTP transports
+  }
+  ```
+</Accordion>
+
+<Note>
+  `IHttpContextAccessor` uses `AsyncLocal<T>` internally to provide the current context. This is thread-safe and works correctly with async/await.
+</Note>
+
+## API Reference
+
+- [`IHttpContextAccessor`](https://learn.microsoft.com/dotnet/api/microsoft.aspnetcore.http.ihttpcontextaccessor) - Service for accessing HttpContext
+- [`HttpContext`](https://learn.microsoft.com/dotnet/api/microsoft.aspnetcore.http.httpcontext) - Encapsulates HTTP request information
+- [`HttpRequest`](https://learn.microsoft.com/dotnet/api/microsoft.aspnetcore.http.httprequest) - HTTP request information
+- [`HttpResponse`](https://learn.microsoft.com/dotnet/api/microsoft.aspnetcore.http.httpresponse) - HTTP response object

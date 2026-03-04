@@ -1,0 +1,396 @@
+---
+title: Middleware & Endpoints
+description: MapMcp() endpoint configuration and ASP.NET Core middleware integration
+---
+
+The `MapMcp()` extension method sets up HTTP endpoints for handling MCP Streamable HTTP transport in ASP.NET Core applications.
+
+## MapMcp
+
+Maps MCP protocol endpoints to the application's request pipeline.
+
+```csharp
+public static IEndpointConventionBuilder MapMcp(
+    this IEndpointRouteBuilder endpoints,
+    string pattern = "")
+```
+
+### Parameters
+
+<ParamField path="endpoints" type="IEndpointRouteBuilder" required>
+  The endpoint route builder (typically your `WebApplication` instance).
+</ParamField>
+
+<ParamField path="pattern" type="string" default="">
+  The route pattern prefix to map MCP endpoints to. Supports ASP.NET Core route templates.
+  
+  Examples:
+  - `""` - Maps to root path
+  - `"/mcp"` - Maps to `/mcp`
+  - `"/{category}"` - Maps with route parameter
+  - `"/api/v1/mcp"` - Maps to nested path
+</ParamField>
+
+### Returns
+
+<ResponseField name="IEndpointConventionBuilder">
+  A builder for configuring endpoint conventions like authorization policies, CORS, rate limiting, and other middleware.
+</ResponseField>
+
+### Endpoints Created
+
+The method creates the following endpoints:
+
+#### Streamable HTTP Transport (2025-11-25 spec)
+
+<ParamField path="POST {pattern}" type="endpoint">
+  Handles MCP client requests. Accepts JSON-RPC messages and may respond with:
+  - `200 OK` with `text/event-stream` for streaming responses
+  - `202 Accepted` for requests with no immediate response
+  - `404 Not Found` if session ID is invalid
+  
+  **Headers:**
+  - `MCP-Protocol-Version` (required) - Protocol version (e.g., "2025-11-25")
+  - `Mcp-Session-Id` (optional) - Session identifier for stateful mode
+  - `Last-Event-ID` (optional) - For resuming interrupted streams
+  
+  **Content-Type:** `application/json`
+  
+  **Accept:** Must include both `application/json` and `text/event-stream`
+</ParamField>
+
+<ParamField path="GET {pattern}" type="endpoint">
+  Opens a persistent SSE stream for receiving server-to-client messages and requests.
+  
+  Not available in stateless mode.
+  
+  **Headers:**
+  - `Mcp-Session-Id` (required) - Session identifier
+  - `Last-Event-ID` (optional) - For resuming from a specific event
+  
+  **Response:** `200 OK` with `text/event-stream`
+</ParamField>
+
+<ParamField path="DELETE {pattern}" type="endpoint">
+  Explicitly terminates an MCP session and cleans up resources.
+  
+  Not available in stateless mode.
+  
+  **Headers:**
+  - `Mcp-Session-Id` (required) - Session identifier to delete
+</ParamField>
+
+#### Legacy HTTP with SSE Transport (2024-11-05 spec)
+
+<ParamField path="GET {pattern}/sse" type="endpoint">
+  Legacy SSE endpoint for backward compatibility.
+  
+  Not available in stateless mode.
+  
+  **Response:** `200 OK` with `text/event-stream`
+</ParamField>
+
+<ParamField path="POST {pattern}/message" type="endpoint">
+  Legacy message endpoint for backward compatibility.
+  
+  Not available in stateless mode.
+  
+  **Content-Type:** `application/json`
+  
+  **Response:** `202 Accepted`
+</ParamField>
+
+## Basic Usage
+
+<CodeGroup>
+```csharp Minimal Setup
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<MyTools>();
+
+var app = builder.Build();
+
+app.MapMcp();
+
+app.Run();
+```
+
+```csharp Custom Route
+var app = builder.Build();
+
+// Map MCP to /api/mcp
+app.MapMcp("/api/mcp");
+
+app.Run();
+```
+
+```csharp Route Parameters
+var app = builder.Build();
+
+// Map with route parameter for per-session configuration
+app.MapMcp("/{category}");
+
+app.Run();
+```
+</CodeGroup>
+
+## Authorization
+
+Apply authorization policies to MCP endpoints using the returned `IEndpointConventionBuilder`.
+
+<CodeGroup>
+```csharp Require Authentication
+app.MapMcp()
+    .RequireAuthorization();
+```
+
+```csharp Custom Policy
+app.MapMcp()
+    .RequireAuthorization("McpUserPolicy");
+```
+
+```csharp Multiple Policies
+app.MapMcp("/admin")
+    .RequireAuthorization("AdminOnly", "McpAccess");
+```
+</CodeGroup>
+
+### Tool-Level Authorization
+
+For granular authorization on individual tools, prompts, or resources:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .AddAuthorizationFilters()
+    .WithTools<MyTools>();
+
+// In your tool class
+public class MyTools
+{
+    [McpServerTool("admin_tool")]
+    [Authorize("AdminOnly")]
+    public static string AdminOperation()
+    {
+        return "Admin operation completed";
+    }
+
+    [McpServerTool("public_tool")]
+    [AllowAnonymous]
+    public static string PublicOperation()
+    {
+        return "Public operation completed";
+    }
+}
+```
+
+## CORS Configuration
+
+Enable CORS for cross-origin MCP clients:
+
+<CodeGroup>
+```csharp Basic CORS
+builder.Services.AddCors(options =>
+{
+    options.AddDefaultPolicy(policy =>
+    {
+        policy.WithOrigins("https://client.example.com")
+              .AllowAnyMethod()
+              .AllowAnyHeader();
+    });
+});
+
+var app = builder.Build();
+app.UseCors();
+
+app.MapMcp();
+```
+
+```csharp CORS on Specific Endpoint
+builder.Services.AddCors(options =>
+{
+    options.AddPolicy("McpCors", policy =>
+    {
+        policy.WithOrigins("https://client.example.com")
+              .WithMethods("GET", "POST", "DELETE")
+              .WithHeaders("Mcp-Session-Id", "MCP-Protocol-Version")
+              .WithExposedHeaders("Mcp-Session-Id");
+    });
+});
+
+var app = builder.Build();
+
+app.MapMcp()
+    .RequireCors("McpCors");
+```
+</CodeGroup>
+
+## Rate Limiting
+
+Protect MCP endpoints with rate limiting:
+
+```csharp
+using System.Threading.RateLimiting;
+
+builder.Services.AddRateLimiter(options =>
+{
+    options.AddFixedWindowLimiter("mcpLimit", config =>
+    {
+        config.PermitLimit = 100;
+        config.Window = TimeSpan.FromMinutes(1);
+        config.QueueProcessingOrder = QueueProcessingOrder.OldestFirst;
+        config.QueueLimit = 10;
+    });
+});
+
+var app = builder.Build();
+app.UseRateLimiter();
+
+app.MapMcp()
+    .RequireRateLimiting("mcpLimit");
+```
+
+## Per-Session Configuration
+
+Combine route parameters with session configuration:
+
+<CodeGroup>
+```csharp Category-Based Tools
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.ConfigureSessionOptions = async (httpContext, mcpOptions, ct) =>
+        {
+            var category = httpContext.Request.RouteValues["category"]?.ToString();
+            
+            // Filter tools based on category
+            if (category == "calculator")
+            {
+                mcpOptions.Capabilities = new();
+                mcpOptions.Capabilities.Tools = new();
+                mcpOptions.ToolCollection = [/* calculator tools */];
+            }
+        };
+    });
+
+var app = builder.Build();
+app.MapMcp("/{category}");
+```
+
+```csharp User-Based Configuration
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.ConfigureSessionOptions = async (httpContext, mcpOptions, ct) =>
+        {
+            var userId = httpContext.User.FindFirst(ClaimTypes.NameIdentifier)?.Value;
+            
+            // Configure based on user permissions
+            var permissions = await GetUserPermissionsAsync(userId);
+            mcpOptions.ToolCollection = GetToolsForPermissions(permissions);
+        };
+    });
+
+var app = builder.Build();
+
+app.MapMcp()
+    .RequireAuthorization();
+```
+</CodeGroup>
+
+## Multiple MCP Endpoints
+
+Host multiple MCP servers with different configurations:
+
+```csharp
+var app = builder.Build();
+
+// Public MCP endpoint
+app.MapMcp("/public")
+    .AllowAnonymous();
+
+// Admin MCP endpoint
+app.MapMcp("/admin")
+    .RequireAuthorization("AdminPolicy");
+
+// API versioned endpoint
+app.MapMcp("/api/v1/mcp");
+
+app.Run();
+```
+
+## Metadata and OpenAPI
+
+Enrich endpoints with metadata for OpenAPI documentation:
+
+```csharp
+app.MapMcp()
+    .WithName("McpEndpoint")
+    .WithDisplayName("Model Context Protocol")
+    .WithDescription("MCP server for AI tool integration")
+    .WithTags("MCP", "AI", "Tools")
+    .WithOpenApi();
+```
+
+## Error Handling
+
+The endpoints automatically handle errors and return JSON-RPC error responses:
+
+- **400 Bad Request** - Invalid protocol version or malformed JSON-RPC
+- **404 Not Found** - Session not found or expired
+- **406 Not Acceptable** - Missing required Accept headers
+
+Custom error handling can be added via middleware:
+
+```csharp
+app.Use(async (context, next) =>
+{
+    try
+    {
+        await next();
+    }
+    catch (Exception ex)
+    {
+        if (context.Request.Path.StartsWithSegments("/mcp"))
+        {
+            // Custom MCP error logging
+            logger.LogError(ex, "MCP endpoint error");
+        }
+        throw;
+    }
+});
+
+app.MapMcp("/mcp");
+```
+
+## Prerequisites
+
+<Note>
+  `MapMcp()` requires that `WithHttpTransport()` has been called during service registration. Calling `MapMcp()` without proper service configuration will throw an `InvalidOperationException`.
+</Note>
+
+```csharp
+// Required service registration
+builder.Services.AddMcpServer()
+    .WithHttpTransport(); // This must be called first
+
+var app = builder.Build();
+
+// Now you can map endpoints
+app.MapMcp();
+```
+
+## Protocol Specifications
+
+The endpoints implement:
+
+- [Streamable HTTP Transport](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http) (2025-11-25)
+- [HTTP with SSE Transport](https://modelcontextprotocol.io/specification/2024-11-05/basic/transports#http-with-sse) (2024-11-05 - legacy)
+
+Supported protocol versions:
+- 2024-11-05
+- 2025-03-26
+- 2025-06-18
+- 2025-11-25

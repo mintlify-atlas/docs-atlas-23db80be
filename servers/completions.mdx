@@ -1,0 +1,449 @@
+---
+title: Argument Completions
+description: Provide auto-complete suggestions for prompt and resource arguments
+---
+
+The MCP C# SDK supports argument completion, allowing servers to provide auto-complete suggestions for prompt arguments and resource URI parameters.
+
+## Overview
+
+Clients can request completion suggestions as users type argument values. This improves user experience by:
+
+- Suggesting valid values for parameters
+- Helping discover available options
+- Reducing errors from invalid input
+- Speeding up parameter entry
+
+## Implementing Completions
+
+Use the `WithCompleteHandler` method to configure a completion handler:
+
+```csharp Program.cs
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithPrompts<MyPrompts>()
+    .WithResources<MyResources>()
+    .WithCompleteHandler(async (ctx, ct) =>
+    {
+        if (ctx.Params is not { } @params)
+        {
+            throw new NotSupportedException("Params are required.");
+        }
+
+        var @ref = @params.Ref;
+        var argument = @params.Argument;
+
+        // Handle prompt argument completion
+        if (@ref is PromptReference pr)
+        {
+            return await CompletePromptArgument(pr, argument);
+        }
+
+        // Handle resource URI parameter completion
+        if (@ref is ResourceTemplateReference rtr)
+        {
+            return await CompleteResourceParameter(rtr, argument);
+        }
+
+        throw new NotSupportedException($"Unknown reference type: {@ref.Type}");
+    });
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+## Prompt Argument Completions
+
+Provide suggestions for prompt arguments:
+
+```csharp
+static Task<CompleteResult> CompletePromptArgument(
+    PromptReference promptRef,
+    CompletionArgument argument)
+{
+    // Define completions for different arguments
+    var completions = new Dictionary<string, IEnumerable<string>>
+    {
+        { "style", ["casual", "formal", "technical", "friendly"] },
+        { "temperature", ["0", "0.5", "0.7", "1.0"] },
+        { "language", ["python", "javascript", "csharp", "java", "go"] },
+        { "complexity", ["beginner", "intermediate", "advanced", "expert"] }
+    };
+
+    // Get matching values for the argument
+    if (!completions.TryGetValue(argument.Name, out var values))
+    {
+        throw new NotSupportedException($"Unknown argument name: {argument.Name}");
+    }
+
+    // Filter by what the user has typed
+    var matchingValues = values
+        .Where(v => v.StartsWith(argument.Value, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    return Task.FromResult(new CompleteResult
+    {
+        Completion = new Completion
+        {
+            Values = matchingValues,
+            HasMore = false,
+            Total = matchingValues.Count
+        }
+    });
+}
+```
+
+### Example Usage
+
+Given this prompt:
+
+```csharp
+[McpServerPrompt(Name = "code_review")]
+[Description("Generate a code review prompt")]
+public static string CodeReview(
+    [Description("Programming language")] string language,
+    [Description("Code complexity level")] string complexity)
+{
+    return $"Review this {language} code at {complexity} level";
+}
+```
+
+When a client requests completion for `language` with value `"py"`, the server returns `["python"]`.
+
+## Resource URI Parameter Completions
+
+Provide suggestions for resource template parameters:
+
+```csharp
+static Task<CompleteResult> CompleteResourceParameter(
+    ResourceTemplateReference resourceRef,
+    CompletionArgument argument)
+{
+    // Extract parameter name from URI template
+    // e.g., "file://{category}/{filename}" -> complete "category" or "filename"
+    
+    var uri = resourceRef.Uri;
+    var parameterName = ExtractParameterName(uri, argument.Value);
+
+    var completions = parameterName switch
+    {
+        "category" => new[] { "documents", "images", "videos", "audio" },
+        "id" => new[] { "1", "2", "3", "4", "5" },
+        "status" => new[] { "active", "pending", "completed", "archived" },
+        _ => Array.Empty<string>()
+    };
+
+    var matchingValues = completions
+        .Where(v => v.StartsWith(argument.Value, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+
+    return Task.FromResult(new CompleteResult
+    {
+        Completion = new Completion
+        {
+            Values = matchingValues,
+            HasMore = false,
+            Total = matchingValues.Count
+        }
+    });
+}
+
+static string ExtractParameterName(string uriTemplate, string partialValue)
+{
+    // Parse URI template and determine which parameter is being completed
+    // This is a simplified example - production code would need more robust parsing
+    var lastSlash = uriTemplate.LastIndexOf('/');
+    var lastPart = uriTemplate.Substring(lastSlash + 1);
+    
+    if (lastPart.StartsWith("{") && lastPart.EndsWith("}"))
+    {
+        return lastPart.Trim('{', '}');
+    }
+    
+    return "id"; // default
+}
+```
+
+### Example Usage
+
+Given this resource template:
+
+```csharp
+[McpServerResource(
+    UriTemplate = "file://{category}/{filename}",
+    Name = "File Resource"
+)]
+public static string GetFile(string category, string filename)
+{
+    return $"Content of {category}/{filename}";
+}
+```
+
+When completing `category` with value `"doc"`, the server returns `["documents"]`.
+
+## Complete Result Structure
+
+<ParamField path="Values" type="List<string>" required>
+  Array of completion values matching the user's input.
+</ParamField>
+
+<ParamField path="Total" type="int">
+  Total number of available completions (before filtering by user input).
+</ParamField>
+
+<ParamField path="HasMore" type="bool">
+  Whether there are more completions available beyond what's returned.
+</ParamField>
+
+## Pagination Support
+
+For large completion sets, implement pagination:
+
+```csharp
+.WithCompleteHandler(async (ctx, ct) =>
+{
+    var @params = ctx.Params;
+    var argument = @params.Argument;
+    
+    // Get all possible values
+    var allValues = await GetAllCompletionValues(argument.Name);
+    
+    // Filter by user input
+    var filteredValues = allValues
+        .Where(v => v.StartsWith(argument.Value, StringComparison.OrdinalIgnoreCase))
+        .ToList();
+    
+    // Implement pagination
+    const int pageSize = 50;
+    var page = 0; // Extract from context if needed
+    var pagedValues = filteredValues
+        .Skip(page * pageSize)
+        .Take(pageSize)
+        .ToList();
+    
+    return new CompleteResult
+    {
+        Completion = new Completion
+        {
+            Values = pagedValues,
+            HasMore = filteredValues.Count > (page + 1) * pageSize,
+            Total = filteredValues.Count
+        }
+    };
+});
+```
+
+## Dynamic Completions
+
+Generate completions dynamically from databases or APIs:
+
+```csharp
+public class CompletionService
+{
+    private readonly IDbContext _dbContext;
+    private readonly IHttpClientFactory _httpClientFactory;
+
+    public async Task<IEnumerable<string>> GetUserCompletions(
+        string prefix,
+        CancellationToken cancellationToken)
+    {
+        return await _dbContext.Users
+            .Where(u => u.Username.StartsWith(prefix))
+            .Select(u => u.Username)
+            .Take(20)
+            .ToListAsync(cancellationToken);
+    }
+
+    public async Task<IEnumerable<string>> GetCategoryCompletions(
+        string prefix,
+        CancellationToken cancellationToken)
+    {
+        var client = _httpClientFactory.CreateClient("CatalogApi");
+        var response = await client.GetFromJsonAsync<CategoryResponse>(
+            $"/categories?prefix={prefix}",
+            cancellationToken);
+        return response?.Categories ?? [];
+    }
+}
+```
+
+Use the service in the completion handler:
+
+```csharp
+.WithCompleteHandler(async (ctx, ct) =>
+{
+    var services = ctx.Services;
+    var completionService = services.GetRequiredService<CompletionService>();
+    
+    var @params = ctx.Params;
+    var argument = @params.Argument;
+    
+    var values = argument.Name switch
+    {
+        "username" => await completionService.GetUserCompletions(argument.Value, ct),
+        "category" => await completionService.GetCategoryCompletions(argument.Value, ct),
+        _ => Enumerable.Empty<string>()
+    };
+    
+    var valueList = values.ToList();
+    
+    return new CompleteResult
+    {
+        Completion = new Completion
+        {
+            Values = valueList,
+            HasMore = false,
+            Total = valueList.Count
+        }
+    };
+});
+```
+
+## Completion Context
+
+The `RequestContext<CompleteRequestParams>` provides:
+
+```csharp
+ctx.Params.Ref        // PromptReference or ResourceTemplateReference
+ctx.Params.Argument   // CompletionArgument with Name and Value
+ctx.Server           // McpServer instance
+ctx.Services         // IServiceProvider for DI
+```
+
+### CompletionArgument Properties
+
+<ParamField path="Name" type="string" required>
+  The name of the argument being completed.
+</ParamField>
+
+<ParamField path="Value" type="string" required>
+  The partial value entered by the user so far.
+</ParamField>
+
+## Error Handling
+
+Handle completion errors appropriately:
+
+```csharp
+.WithCompleteHandler(async (ctx, ct) =>
+{
+    try
+    {
+        var @params = ctx.Params;
+        
+        if (@params?.Ref is not PromptReference && @params?.Ref is not ResourceTemplateReference)
+        {
+            throw new McpProtocolException(
+                "Invalid reference type for completion",
+                McpErrorCode.InvalidParams);
+        }
+        
+        // ... handle completion
+    }
+    catch (Exception ex) when (ex is not McpException)
+    {
+        throw new McpException($"Completion failed: {ex.Message}");
+    }
+});
+```
+
+## Complete Example
+
+Here's a complete implementation from the EverythingServer sample:
+
+```csharp Program.cs
+var exampleCompletions = new Dictionary<string, IEnumerable<string>>
+{
+    { "style", ["casual", "formal", "technical", "friendly"] },
+    { "temperature", ["0", "0.5", "0.7", "1.0"] },
+    { "resourceId", ["1", "2", "3", "4", "5"] }
+};
+
+builder.Services.AddMcpServer()
+    .WithCompleteHandler(async (ctx, ct) =>
+    {
+        var @params = ctx.Params ?? throw new NotSupportedException("Params are required.");
+        var @ref = @params.Ref;
+        var argument = @params.Argument;
+
+        if (@ref is ResourceTemplateReference rtr)
+        {
+            var resourceId = rtr.Uri?.Split("/").Last();
+            if (resourceId is null)
+            {
+                return new CompleteResult();
+            }
+
+            var values = exampleCompletions["resourceId"]
+                .Where(id => id.StartsWith(argument.Value));
+
+            return new CompleteResult
+            {
+                Completion = new Completion
+                {
+                    Values = [.. values],
+                    HasMore = false,
+                    Total = values.Count()
+                }
+            };
+        }
+
+        if (@ref is PromptReference pr)
+        {
+            if (!exampleCompletions.TryGetValue(argument.Name, out var completionValues))
+            {
+                throw new NotSupportedException($"Unknown argument name: {argument.Name}");
+            }
+
+            var values = completionValues.Where(value => value.StartsWith(argument.Value));
+            return new CompleteResult
+            {
+                Completion = new Completion
+                {
+                    Values = [.. values],
+                    HasMore = false,
+                    Total = values.Count()
+                }
+            };
+        }
+
+        throw new NotSupportedException($"Unknown reference type: {@ref.Type}");
+    });
+```
+
+## Best Practices
+
+<Steps>
+  <Step title="Fast Response Times">
+    Keep completion handlers fast. Use caching for frequently accessed data and implement timeouts for external calls.
+  </Step>
+
+  <Step title="Case-Insensitive Matching">
+    Use case-insensitive matching to improve user experience: `StringComparison.OrdinalIgnoreCase`.
+  </Step>
+
+  <Step title="Limit Result Count">
+    Return a reasonable number of completions (typically 10-50) to avoid overwhelming clients.
+  </Step>
+
+  <Step title="Sort Results">
+    Return completions in a logical order - alphabetically, by relevance, or by usage frequency.
+  </Step>
+
+  <Step title="Handle Empty Input">
+    When `argument.Value` is empty, return the most relevant or popular completions.
+  </Step>
+</Steps>
+
+## Next Steps
+
+- Learn about [Tools](/servers/tools) for executable functions
+- Explore [Prompts](/servers/prompts) for prompt templates
+- Add [Filters](/servers/filters) for cross-cutting concerns

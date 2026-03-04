@@ -1,0 +1,356 @@
+---
+title: "ASP.NET Core HTTP Server"
+description: "Build an MCP server with HTTP transport using ASP.NET Core"
+---
+
+The AspNetCoreMcpServer example demonstrates how to build an MCP server using ASP.NET Core with HTTP transport. This approach is ideal for web-based deployments, cloud hosting, and scenarios where you need HTTP endpoints instead of stdio.
+
+## What You'll Build
+
+A web-based MCP server that:
+- Exposes tools via HTTP endpoints
+- Uses ASP.NET Core for hosting
+- Provides multiple tools: Echo, Weather, and LLM Sampling
+- Includes resources for additional data
+- Has OpenTelemetry instrumentation built-in
+- Uses HttpClientFactory for external API calls
+
+## Complete Example Code
+
+<Steps>
+  <Step title="Create the main Program.cs">
+    Set up the ASP.NET Core application with MCP server middleware.
+
+    ```csharp Program.cs
+    using OpenTelemetry;
+    using OpenTelemetry.Metrics;
+    using OpenTelemetry.Trace;
+    using AspNetCoreMcpServer.Tools;
+    using AspNetCoreMcpServer.Resources;
+    using System.Net.Http.Headers;
+
+    var builder = WebApplication.CreateBuilder(args);
+    builder.Services.AddMcpServer()
+        .WithHttpTransport()
+        .WithTools<EchoTool>()
+        .WithTools<SampleLlmTool>()
+        .WithTools<WeatherTools>()
+        .WithResources<SimpleResourceType>();
+
+    builder.Services.AddOpenTelemetry()
+        .WithTracing(b => b.AddSource("*")
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation())
+        .WithMetrics(b => b.AddMeter("*")
+            .AddAspNetCoreInstrumentation()
+            .AddHttpClientInstrumentation())
+        .WithLogging()
+        .UseOtlpExporter();
+
+    // Configure HttpClientFactory for weather.gov API
+    builder.Services.AddHttpClient("WeatherApi", client =>
+    {
+        client.BaseAddress = new Uri("https://api.weather.gov");
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("weather-tool", "1.0"));
+    });
+
+    var app = builder.Build();
+
+    app.MapMcp();
+
+    app.Run();
+    ```
+
+    <Note>
+      The `MapMcp()` method automatically sets up all necessary MCP HTTP endpoints.
+    </Note>
+  </Step>
+
+  <Step title="Implement the EchoTool">
+    A simple tool that echoes back user input.
+
+    ```csharp Tools/EchoTool.cs
+    using ModelContextProtocol.Server;
+    using System.ComponentModel;
+
+    namespace AspNetCoreMcpServer.Tools;
+
+    [McpServerToolType]
+    public sealed class EchoTool
+    {
+        [McpServerTool, Description("Echoes the input back to the client.")]
+        public static string Echo(string message)
+        {
+            return "hello " + message;
+        }
+    }
+    ```
+  </Step>
+
+  <Step title="Create the SampleLlmTool">
+    This tool demonstrates how to use the MCP sampling feature to call an LLM.
+
+    ```csharp Tools/SampleLlmTool.cs
+    using Microsoft.Extensions.AI;
+    using ModelContextProtocol.Server;
+    using System.ComponentModel;
+
+    namespace AspNetCoreMcpServer.Tools;
+
+    /// <summary>
+    /// This tool uses dependency injection and async method
+    /// </summary>
+    [McpServerToolType]
+    public sealed class SampleLlmTool
+    {
+        [McpServerTool(Name = "sampleLLM"), Description("Samples from an LLM using MCP's sampling feature")]
+        public static async Task<string> SampleLLM(
+            McpServer thisServer,
+            [Description("The prompt to send to the LLM")] string prompt,
+            [Description("Maximum number of tokens to generate")] int maxTokens,
+            CancellationToken cancellationToken)
+        {
+            ChatOptions options = new()
+            {
+                Instructions = "You are a helpful test server.",
+                MaxOutputTokens = maxTokens,
+                Temperature = 0.7f,
+            };
+
+            var samplingResponse = await thisServer.AsSamplingChatClient().GetResponseAsync(prompt, options, cancellationToken);
+
+            return $"LLM sampling result: {samplingResponse}";
+        }
+    }
+    ```
+
+    <Tip>
+      The sampling feature allows servers to request LLM completions from the client, enabling sophisticated AI-powered tools.
+    </Tip>
+  </Step>
+
+  <Step title="Add the WeatherTools">
+    Weather tools that fetch data from the National Weather Service API.
+
+    ```csharp Tools/WeatherTools.cs
+    using ModelContextProtocol;
+    using ModelContextProtocol.Server;
+    using System.ComponentModel;
+    using System.Globalization;
+    using System.Text.Json;
+
+    namespace AspNetCoreMcpServer.Tools;
+
+    [McpServerToolType]
+    public sealed class WeatherTools
+    {
+        private readonly IHttpClientFactory _httpClientFactory;
+
+        public WeatherTools(IHttpClientFactory httpClientFactory)
+        {
+            _httpClientFactory = httpClientFactory;
+        }
+
+        [McpServerTool, Description("Get weather alerts for a US state.")]
+        [McpMeta("category", "weather")]
+        [McpMeta("dataSource", "weather.gov")]
+        public async Task<string> GetAlerts(
+            [Description("The US state to get alerts for. Use the 2 letter abbreviation for the state (e.g. NY).")] string state)
+        {
+            var client = _httpClientFactory.CreateClient("WeatherApi");
+            using var responseStream = await client.GetStreamAsync($"/alerts/active/area/{state}");
+            using var jsonDocument = await JsonDocument.ParseAsync(responseStream)
+                ?? throw new McpException("No JSON returned from alerts endpoint");
+
+            var alerts = jsonDocument.RootElement.GetProperty("features").EnumerateArray();
+
+            if (!alerts.Any())
+            {
+                return "No active alerts for this state.";
+            }
+
+            return string.Join("\n--\n", alerts.Select(alert =>
+            {
+                JsonElement properties = alert.GetProperty("properties");
+                return $"""
+                        Event: {properties.GetProperty("event").GetString()}
+                        Area: {properties.GetProperty("areaDesc").GetString()}
+                        Severity: {properties.GetProperty("severity").GetString()}
+                        Description: {properties.GetProperty("description").GetString()}
+                        Instruction: {properties.GetProperty("instruction").GetString()}
+                        """;
+            }));
+        }
+
+        [McpServerTool, Description("Get weather forecast for a location.")]
+        [McpMeta("category", "weather")]
+        [McpMeta("recommendedModel", "gpt-4")]
+        public async Task<string> GetForecast(
+            [Description("Latitude of the location.")] double latitude,
+            [Description("Longitude of the location.")] double longitude)
+        {
+            var client = _httpClientFactory.CreateClient("WeatherApi");
+            var pointUrl = string.Create(CultureInfo.InvariantCulture, $"/points/{latitude},{longitude}");
+
+            using var locationResponseStream = await client.GetStreamAsync(pointUrl);
+            using var locationDocument = await JsonDocument.ParseAsync(locationResponseStream);
+            var forecastUrl = locationDocument?.RootElement.GetProperty("properties").GetProperty("forecast").GetString()
+                ?? throw new McpException($"No forecast URL provided by {client.BaseAddress}points/{latitude},{longitude}");
+
+            using var forecastResponseStream = await client.GetStreamAsync(forecastUrl);
+            using var forecastDocument = await JsonDocument.ParseAsync(forecastResponseStream);
+            var periods = forecastDocument?.RootElement.GetProperty("properties").GetProperty("periods").EnumerateArray()
+                ?? throw new McpException("No JSON returned from forecast endpoint");
+
+            return string.Join("\n---\n", periods.Select(period => $"""
+                    {period.GetProperty("name").GetString()}
+                    Temperature: {period.GetProperty("temperature").GetInt32()}°F
+                    Wind: {period.GetProperty("windSpeed").GetString()} {period.GetProperty("windDirection").GetString()}
+                    Forecast: {period.GetProperty("detailedForecast").GetString()}
+                    """));
+        }
+    }
+    ```
+
+    <Note>
+      The `[McpMeta]` attribute allows you to attach custom metadata to tools, which can be used for categorization or routing.
+    </Note>
+  </Step>
+
+  <Step title="Create a simple resource">
+    Resources provide static or dynamic data to clients.
+
+    ```csharp Resources/SimpleResourceType.cs
+    using ModelContextProtocol.Server;
+    using System.ComponentModel;
+
+    namespace AspNetCoreMcpServer.Resources;
+
+    [McpServerResourceType]
+    public class SimpleResourceType
+    {
+        [McpServerResource, Description("A direct text resource")]
+        public static string DirectTextResource() => "This is a direct resource";
+    }
+    ```
+  </Step>
+</Steps>
+
+## Running the Server
+
+```bash
+dotnet run
+```
+
+The server will start and listen for HTTP requests. By default, it runs on:
+- `http://localhost:5000`
+- `https://localhost:5001`
+
+You can configure the ports in `appsettings.json` or via environment variables.
+
+## Key Concepts
+
+### HTTP Transport
+
+Unlike stdio transport, HTTP transport exposes MCP over HTTP endpoints:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<WeatherTools>();
+
+app.MapMcp();  // Maps MCP endpoints
+```
+
+### HttpClientFactory Integration
+
+Use ASP.NET Core's `HttpClientFactory` for robust HTTP client management:
+
+```csharp
+builder.Services.AddHttpClient("WeatherApi", client =>
+{
+    client.BaseAddress = new Uri("https://api.weather.gov");
+    client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("weather-tool", "1.0"));
+});
+```
+
+Then inject it into your tools:
+
+```csharp
+public WeatherTools(IHttpClientFactory httpClientFactory)
+{
+    _httpClientFactory = httpClientFactory;
+}
+```
+
+### Dependency Injection in Tools
+
+Tools can use constructor injection for dependencies:
+
+```csharp
+[McpServerToolType]
+public sealed class WeatherTools
+{
+    private readonly IHttpClientFactory _httpClientFactory;
+
+    public WeatherTools(IHttpClientFactory httpClientFactory)
+    {
+        _httpClientFactory = httpClientFactory;
+    }
+}
+```
+
+And method injection for per-request dependencies:
+
+```csharp
+public static async Task<string> SampleLLM(
+    McpServer thisServer,          // Injected
+    string prompt,                  // From client
+    int maxTokens,                 // From client
+    CancellationToken cancellationToken)  // Injected
+```
+
+### Resources
+
+Register resources alongside tools:
+
+```csharp
+builder.Services.AddMcpServer()
+    .WithTools<WeatherTools>()
+    .WithResources<SimpleResourceType>();
+```
+
+Resources are static or dynamic data that clients can retrieve.
+
+### OpenTelemetry
+
+The example includes comprehensive OpenTelemetry instrumentation:
+
+```csharp
+builder.Services.AddOpenTelemetry()
+    .WithTracing(b => b.AddSource("*")
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation())
+    .WithMetrics(b => b.AddMeter("*")
+        .AddAspNetCoreInstrumentation()
+        .AddHttpClientInstrumentation())
+    .UseOtlpExporter();
+```
+
+## Connecting a Client
+
+To connect an MCP client to this HTTP server, use HTTP transport:
+
+```csharp
+var mcpClient = await McpClient.CreateAsync(
+    new HttpClientTransport(new HttpClient
+    {
+        BaseAddress = new Uri("http://localhost:5000")
+    }));
+```
+
+## Next Steps
+
+- Add [OAuth authentication](/examples/protected-server) to secure your server
+- Learn about [stdio servers](/examples/weather-server) for desktop integration
+- Build a [chat client](/examples/chat-client) to consume your server's tools

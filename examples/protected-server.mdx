@@ -1,0 +1,390 @@
+---
+title: "Protected Server with OAuth"
+description: "Secure your MCP server with OAuth 2.0 and JWT authentication"
+---
+
+The ProtectedMcpServer example demonstrates how to secure an MCP server using OAuth 2.0 authentication with JWT bearer tokens. This is essential for production deployments where you need to control access to your MCP tools and resources.
+
+## What You'll Build
+
+A secure MCP server that:
+- Requires OAuth 2.0 authentication for all requests
+- Validates JWT bearer tokens
+- Exposes protected weather tools
+- Provides OAuth resource metadata for client discovery
+- Integrates with ASP.NET Core authentication and authorization
+- Uses the RFC 8707 OAuth 2.0 Resource Indicators standard
+
+## Complete Example Code
+
+<Steps>
+  <Step title="Create the main Program.cs with authentication">
+    Set up JWT bearer authentication and MCP-specific OAuth configuration.
+
+    ```csharp Program.cs
+    using Microsoft.AspNetCore.Authentication.JwtBearer;
+    using Microsoft.IdentityModel.Tokens;
+    using ModelContextProtocol.AspNetCore.Authentication;
+    using ProtectedMcpServer.Tools;
+    using System.Net.Http.Headers;
+    using System.Security.Claims;
+
+    var builder = WebApplication.CreateBuilder(args);
+
+    var serverUrl = "http://localhost:7071/";
+    var inMemoryOAuthServerUrl = "https://localhost:7029";
+
+    builder.Services.AddAuthentication(options =>
+    {
+        options.DefaultChallengeScheme = McpAuthenticationDefaults.AuthenticationScheme;
+        options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+    })
+    .AddJwtBearer(options =>
+    {
+        // Configure to validate tokens from our in-memory OAuth server
+        options.Authority = inMemoryOAuthServerUrl;
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidateIssuer = true,
+            ValidateAudience = true,
+            ValidateLifetime = true,
+            ValidateIssuerSigningKey = true,
+            ValidAudience = serverUrl, // Validate that the audience matches the resource metadata as suggested in RFC 8707
+            ValidIssuer = inMemoryOAuthServerUrl,
+            NameClaimType = "name",
+            RoleClaimType = "roles"
+        };
+
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = context =>
+            {
+                var name = context.Principal?.Identity?.Name ?? "unknown";
+                var email = context.Principal?.FindFirstValue("preferred_username") ?? "unknown";
+                Console.WriteLine($"Token validated for: {name} ({email})");
+                return Task.CompletedTask;
+            },
+            OnAuthenticationFailed = context =>
+            {
+                Console.WriteLine($"Authentication failed: {context.Exception.Message}");
+                return Task.CompletedTask;
+            },
+            OnChallenge = context =>
+            {
+                Console.WriteLine($"Challenging client to authenticate with Entra ID");
+                return Task.CompletedTask;
+            }
+        };
+    })
+    .AddMcp(options =>
+    {
+        options.ResourceMetadata = new()
+        {
+            ResourceDocumentation = "https://docs.example.com/api/weather",
+            AuthorizationServers = { inMemoryOAuthServerUrl },
+            ScopesSupported = ["mcp:tools"],
+        };
+    });
+
+    builder.Services.AddAuthorization();
+
+    builder.Services.AddHttpContextAccessor();
+    builder.Services.AddMcpServer()
+        .WithTools<WeatherTools>()
+        .WithHttpTransport();
+
+    // Configure HttpClientFactory for weather.gov API
+    builder.Services.AddHttpClient("WeatherApi", client =>
+    {
+        client.BaseAddress = new Uri("https://api.weather.gov");
+        client.DefaultRequestHeaders.UserAgent.Add(new ProductInfoHeaderValue("weather-tool", "1.0"));
+    });
+
+    var app = builder.Build();
+
+    app.UseAuthentication();
+    app.UseAuthorization();
+
+    // Use the default MCP policy name that we've configured
+    app.MapMcp().RequireAuthorization();
+
+    Console.WriteLine($"Starting MCP server with authorization at {serverUrl}");
+    Console.WriteLine($"Using in-memory OAuth server at {inMemoryOAuthServerUrl}");
+    Console.WriteLine($"Protected Resource Metadata URL: {serverUrl}.well-known/oauth-protected-resource");
+    Console.WriteLine("Press Ctrl+C to stop the server");
+
+    app.Run(serverUrl);
+    ```
+
+    <Note>
+      The `.AddMcp()` extension configures MCP-specific OAuth resource metadata that clients can discover.
+    </Note>
+  </Step>
+
+  <Step title="Implement the WeatherTools">
+    Protected tools that require authentication to access.
+
+    ```csharp Tools/WeatherTools.cs
+    using ModelContextProtocol;
+    using ModelContextProtocol.Server;
+    using System.ComponentModel;
+    using System.Globalization;
+    using System.Text.Json;
+
+    namespace ProtectedMcpServer.Tools;
+
+    [McpServerToolType]
+    public sealed class WeatherTools
+    {
+        private readonly IHttpClientFactory _httpClientFactory;
+
+        public WeatherTools(IHttpClientFactory httpClientFactory)
+        {
+            _httpClientFactory = httpClientFactory;
+        }
+
+        [McpServerTool, Description("Get weather alerts for a US state.")]
+        public async Task<string> GetAlerts(
+            [Description("The US state to get alerts for. Use the 2 letter abbreviation for the state (e.g. NY).")] string state)
+        {
+            var client = _httpClientFactory.CreateClient("WeatherApi");
+            using var jsonDocument = await client.GetFromJsonAsync<JsonDocument>($"/alerts/active/area/{state}")
+                ?? throw new McpException("No JSON returned from alerts endpoint");
+
+            var alerts = jsonDocument.RootElement.GetProperty("features").EnumerateArray();
+
+            if (!alerts.Any())
+            {
+                return "No active alerts for this state.";
+            }
+
+            return string.Join("\n--\n", alerts.Select(alert =>
+            {
+                JsonElement properties = alert.GetProperty("properties");
+                return $"""
+                        Event: {properties.GetProperty("event").GetString()}
+                        Area: {properties.GetProperty("areaDesc").GetString()}
+                        Severity: {properties.GetProperty("severity").GetString()}
+                        Description: {properties.GetProperty("description").GetString()}
+                        Instruction: {properties.GetProperty("instruction").GetString()}
+                        """;
+            }));
+        }
+
+        [McpServerTool, Description("Get weather forecast for a location.")]
+        public async Task<string> GetForecast(
+            [Description("Latitude of the location.")] double latitude,
+            [Description("Longitude of the location.")] double longitude)
+        {
+            var client = _httpClientFactory.CreateClient("WeatherApi");
+            var pointUrl = string.Create(CultureInfo.InvariantCulture, $"/points/{latitude},{longitude}");
+
+            using var locationDocument = await client.GetFromJsonAsync<JsonDocument>(pointUrl);
+            var forecastUrl = locationDocument?.RootElement.GetProperty("properties").GetProperty("forecast").GetString()
+                ?? throw new McpException($"No forecast URL provided by {client.BaseAddress}points/{latitude},{longitude}");
+
+            using var forecastDocument = await client.GetFromJsonAsync<JsonDocument>(forecastUrl);
+            var periods = forecastDocument?.RootElement.GetProperty("properties").GetProperty("periods").EnumerateArray()
+                ?? throw new McpException("No JSON returned from forecast endpoint");
+
+            return string.Join("\n---\n", periods.Select(period => $"""
+                    {period.GetProperty("name").GetString()}
+                    Temperature: {period.GetProperty("temperature").GetInt32()}°F
+                    Wind: {period.GetProperty("windSpeed").GetString()} {period.GetProperty("windDirection").GetString()}
+                    Forecast: {period.GetProperty("detailedForecast").GetString()}
+                    """));
+        }
+    }
+    ```
+
+    <Tip>
+      These tools are identical to unprotected versions - authentication is handled at the HTTP middleware level, not in the tool code.
+    </Tip>
+  </Step>
+</Steps>
+
+## Running the Server
+
+<Steps>
+  <Step title="Start the Test OAuth Server">
+    First, start the test OAuth server that issues access tokens:
+
+    ```bash
+    cd tests/ModelContextProtocol.TestOAuthServer
+    dotnet run --framework net9.0
+    ```
+
+    The OAuth server will start at `https://localhost:7029`
+
+    <Note>
+      In production, you would use a real OAuth provider like Azure AD, Auth0, or Okta instead of this test server.
+    </Note>
+  </Step>
+
+  <Step title="Trust the development certificate">
+    Ensure the ASP.NET Core dev certificate is trusted:
+
+    ```bash
+    dotnet dev-certs https --clean
+    dotnet dev-certs https --trust
+    ```
+  </Step>
+
+  <Step title="Start the Protected MCP Server">
+    ```bash
+    cd samples/ProtectedMcpServer
+    dotnet run
+    ```
+
+    The server will start at `http://localhost:7071`
+  </Step>
+
+  <Step title="Test with the Protected MCP Client">
+    Use the ProtectedMcpClient sample to test authentication:
+
+    ```bash
+    cd samples/ProtectedMcpClient
+    dotnet run
+    ```
+
+    The client will automatically:
+    1. Discover the OAuth server from resource metadata
+    2. Obtain an access token
+    3. Call protected tools with the token
+  </Step>
+</Steps>
+
+## Key Concepts
+
+### JWT Bearer Authentication
+
+Configure standard ASP.NET Core JWT authentication:
+
+```csharp
+builder.Services.AddAuthentication(options =>
+{
+    options.DefaultChallengeScheme = McpAuthenticationDefaults.AuthenticationScheme;
+    options.DefaultAuthenticateScheme = JwtBearerDefaults.AuthenticationScheme;
+})
+.AddJwtBearer(options =>
+{
+    options.Authority = inMemoryOAuthServerUrl;
+    options.TokenValidationParameters = new TokenValidationParameters
+    {
+        ValidateIssuer = true,
+        ValidateAudience = true,
+        ValidateLifetime = true,
+        ValidateIssuerSigningKey = true,
+        ValidAudience = serverUrl,
+        ValidIssuer = inMemoryOAuthServerUrl,
+    };
+});
+```
+
+### MCP OAuth Resource Metadata
+
+The `.AddMcp()` extension provides OAuth discovery metadata:
+
+```csharp
+.AddMcp(options =>
+{
+    options.ResourceMetadata = new()
+    {
+        ResourceDocumentation = "https://docs.example.com/api/weather",
+        AuthorizationServers = { inMemoryOAuthServerUrl },
+        ScopesSupported = ["mcp:tools"],
+    };
+});
+```
+
+This metadata is exposed at `/.well-known/oauth-protected-resource` for client discovery.
+
+### Requiring Authorization
+
+Protect MCP endpoints with ASP.NET Core authorization:
+
+```csharp
+app.UseAuthentication();
+app.UseAuthorization();
+
+app.MapMcp().RequireAuthorization();
+```
+
+All MCP tools and resources now require a valid JWT token.
+
+### Token Validation Events
+
+Monitor authentication with JWT events:
+
+```csharp
+options.Events = new JwtBearerEvents
+{
+    OnTokenValidated = context =>
+    {
+        var name = context.Principal?.Identity?.Name ?? "unknown";
+        Console.WriteLine($"Token validated for: {name}");
+        return Task.CompletedTask;
+    },
+    OnAuthenticationFailed = context =>
+    {
+        Console.WriteLine($"Authentication failed: {context.Exception.Message}");
+        return Task.CompletedTask;
+    }
+};
+```
+
+### RFC 8707 Resource Indicators
+
+The example follows RFC 8707 by validating the audience claim:
+
+```csharp
+ValidAudience = serverUrl,  // Validate that the audience matches the resource
+```
+
+This ensures tokens are intended for this specific MCP server.
+
+## OAuth Flow
+
+1. **Client discovers server**: Client fetches `/.well-known/oauth-protected-resource`
+2. **Token request**: Client requests token from the OAuth server listed in metadata
+3. **Token issuance**: OAuth server issues JWT with appropriate scopes
+4. **Tool call**: Client calls MCP tools with `Authorization: Bearer <token>` header
+5. **Token validation**: Server validates JWT signature, issuer, audience, and expiration
+6. **Tool execution**: If valid, server executes tool and returns result
+
+## Production Considerations
+
+<CodeGroup>
+```csharp Azure AD / Entra ID
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddMicrosoftIdentityWebApi(builder.Configuration.GetSection("AzureAd"));
+```
+
+```csharp Auth0
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = $"https://{builder.Configuration["Auth0:Domain"]}/";
+        options.Audience = builder.Configuration["Auth0:Audience"];
+    });
+```
+
+```csharp Custom OAuth Server
+builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = "https://your-oauth-server.com";
+        options.TokenValidationParameters = new TokenValidationParameters
+        {
+            ValidAudiences = new[] { "your-mcp-server" },
+            ValidIssuers = new[] { "https://your-oauth-server.com" },
+        };
+    });
+```
+</CodeGroup>
+
+## Next Steps
+
+- Learn about [HTTP servers](/examples/http-server) without authentication
+- Build a [chat client](/examples/chat-client) that handles OAuth flows
+- Explore [stdio servers](/examples/weather-server) for local authentication

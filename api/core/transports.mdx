@@ -1,0 +1,392 @@
+---
+title: Transport Classes
+description: API reference for MCP transport classes including StdioClientTransport and HttpClientTransport
+---
+
+Transport classes handle the underlying communication between MCP clients and servers. The SDK provides multiple transport implementations for different scenarios.
+
+## Namespace
+
+```csharp
+ModelContextProtocol.Client
+```
+
+## IClientTransport Interface
+
+Base interface for all client transports.
+
+```csharp
+public interface IClientTransport
+{
+    string Name { get; }
+    Task<ITransport> ConnectAsync(CancellationToken cancellationToken = default);
+}
+```
+
+## StdioClientTransport
+
+Provides a transport implemented via standard input/output (stdio), launching an external process and communicating through stdin/stdout streams.
+
+```csharp
+public sealed class StdioClientTransport : IClientTransport
+```
+
+### Constructor
+
+```csharp
+public StdioClientTransport(
+    StdioClientTransportOptions options,
+    ILoggerFactory? loggerFactory = null)
+```
+
+<ParamField path="options" type="StdioClientTransportOptions" required>
+  Configuration options for the transport, including the command to execute, arguments, working directory, and environment variables.
+</ParamField>
+
+<ParamField path="loggerFactory" type="ILoggerFactory">
+  A logger factory for creating loggers used for diagnostic output during transport operations.
+</ParamField>
+
+### StdioClientTransportOptions
+
+Configuration options for stdio transport.
+
+<ResponseField name="Command" type="string" required>
+  The command to execute to start the server process (e.g., "node", "python", "dotnet").
+</ResponseField>
+
+<ResponseField name="Arguments" type="IList<string>">
+  The arguments to pass to the server process when it is started.
+</ResponseField>
+
+<ResponseField name="Name" type="string">
+  A transport identifier used for logging purposes.
+</ResponseField>
+
+<ResponseField name="WorkingDirectory" type="string">
+  The working directory for the server process.
+</ResponseField>
+
+<ResponseField name="EnvironmentVariables" type="IDictionary<string, string>">
+  Environment variables to set for the server process. By default, the server process inherits the current environment's variables.
+</ResponseField>
+
+<ResponseField name="ShutdownTimeout" type="TimeSpan">
+  The timeout to wait for the server to shut down gracefully. Default is 5 seconds.
+</ResponseField>
+
+<ResponseField name="StandardErrorLines" type="Action<string>">
+  A callback that is invoked for each line of stderr received from the server process.
+</ResponseField>
+
+### Examples
+
+<CodeGroup>
+```csharp Node.js Server
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "node",
+    Arguments = ["path/to/server.js"],
+    WorkingDirectory = "/path/to/project",
+    EnvironmentVariables = new Dictionary<string, string>
+    {
+        ["API_KEY"] = "your-api-key"
+    },
+    StandardErrorLines = line => Console.WriteLine($"Server stderr: {line}")
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+```csharp Python Server
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "python",
+    Arguments = ["-m", "my_mcp_server"],
+    WorkingDirectory = "/path/to/python/project"
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+```csharp .NET Server
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "dotnet",
+    Arguments = ["run", "--project", "../MyMcpServer/MyMcpServer.csproj"]
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+```csharp NPX Server
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "npx",
+    Arguments = ["-y", "@modelcontextprotocol/server-everything"]
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+</CodeGroup>
+
+## HttpClientTransport
+
+Provides a transport over HTTP using Server-Sent Events (SSE) or Streamable HTTP protocol.
+
+```csharp
+public sealed class HttpClientTransport : IClientTransport, IAsyncDisposable
+```
+
+### Constructor
+
+```csharp
+public HttpClientTransport(
+    HttpClientTransportOptions transportOptions,
+    ILoggerFactory? loggerFactory = null)
+```
+
+```csharp
+public HttpClientTransport(
+    HttpClientTransportOptions transportOptions,
+    HttpClient httpClient,
+    ILoggerFactory? loggerFactory = null,
+    bool ownsHttpClient = false)
+```
+
+<ParamField path="transportOptions" type="HttpClientTransportOptions" required>
+  The configuration options for the transport.
+</ParamField>
+
+<ParamField path="httpClient" type="HttpClient">
+  The HTTP client instance used for requests. If not provided, a new instance is created.
+</ParamField>
+
+<ParamField path="loggerFactory" type="ILoggerFactory">
+  The logger factory for creating loggers used for diagnostic output.
+</ParamField>
+
+<ParamField path="ownsHttpClient" type="bool">
+  `true` to dispose of httpClient when the transport is disposed; `false` if the caller is retaining ownership.
+</ParamField>
+
+### HttpClientTransportOptions
+
+Configuration options for HTTP transport.
+
+<ResponseField name="Endpoint" type="Uri" required>
+  The base address of the server for SSE or Streamable HTTP connections. Must be an absolute HTTP or HTTPS URI.
+</ResponseField>
+
+<ResponseField name="TransportMode" type="HttpTransportMode">
+  The transport mode to use for the connection. Default is `HttpTransportMode.AutoDetect`, which attempts Streamable HTTP first and falls back to SSE.
+</ResponseField>
+
+<ResponseField name="Name" type="string">
+  A transport identifier used for logging purposes.
+</ResponseField>
+
+<ResponseField name="ConnectionTimeout" type="TimeSpan">
+  Timeout used to establish the initial connection to the SSE server. Default is 30 seconds.
+</ResponseField>
+
+<ResponseField name="AdditionalHeaders" type="IDictionary<string, string>">
+  Custom HTTP headers to include in requests to the SSE server.
+</ResponseField>
+
+<ResponseField name="KnownSessionId" type="string">
+  A session identifier that should be reused when connecting to a Streamable HTTP server. Allows reconnecting to an existing session.
+</ResponseField>
+
+<ResponseField name="OwnsSession" type="bool">
+  Indicates whether this transport endpoint is responsible for ending the session on dispose. Default is `true`.
+</ResponseField>
+
+<ResponseField name="OAuth" type="ClientOAuthOptions">
+  The authorization provider to use for OAuth authentication.
+</ResponseField>
+
+<ResponseField name="MaxReconnectionAttempts" type="int">
+  The maximum number of consecutive reconnection attempts when an SSE stream is disconnected. Default is 5.
+</ResponseField>
+
+<ResponseField name="DefaultReconnectionInterval" type="TimeSpan">
+  The default interval at which the client attempts reconnection after an SSE stream is disconnected. Default is 1 second.
+</ResponseField>
+
+### HttpTransportMode Enum
+
+```csharp
+public enum HttpTransportMode
+{
+    AutoDetect,      // Try Streamable HTTP, fall back to SSE
+    StreamableHttp,  // Use Streamable HTTP only
+    Sse              // Use Server-Sent Events only
+}
+```
+
+### Examples
+
+<CodeGroup>
+```csharp Basic HTTP Transport
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://example.com/mcp")
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+```csharp With OAuth Authentication
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = new ClientOAuthOptions
+    {
+        ClientId = "your-client-id",
+        ClientSecret = "your-client-secret",
+        RedirectUri = new Uri("http://localhost:3000/callback"),
+        Scopes = ["read", "write"]
+    }
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+```csharp Custom Headers
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://example.com/mcp"),
+    AdditionalHeaders = new Dictionary<string, string>
+    {
+        ["X-API-Key"] = "your-api-key",
+        ["X-Custom-Header"] = "custom-value"
+    }
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+```csharp Session Resumption (Streamable HTTP)
+// First session - capture session ID
+var options = new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://example.com/mcp"),
+    TransportMode = HttpTransportMode.StreamableHttp
+};
+
+var transport = new HttpClientTransport(options);
+await using var client = await McpClient.CreateAsync(transport);
+
+string sessionId = client.SessionId!;
+var serverCapabilities = client.ServerCapabilities;
+var serverInfo = client.ServerInfo;
+
+// Later - resume the session
+var resumeOptions = new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://example.com/mcp"),
+    TransportMode = HttpTransportMode.StreamableHttp,
+    KnownSessionId = sessionId
+};
+
+var resumeTransport = new HttpClientTransport(resumeOptions);
+await using var resumedClient = await McpClient.ResumeSessionAsync(
+    resumeTransport,
+    new ResumeClientSessionOptions
+    {
+        ServerCapabilities = serverCapabilities,
+        ServerInfo = serverInfo
+    });
+```
+
+```csharp Using Custom HttpClient
+var httpClient = new HttpClient
+{
+    Timeout = TimeSpan.FromMinutes(5)
+};
+
+var transport = new HttpClientTransport(
+    new HttpClientTransportOptions
+    {
+        Endpoint = new Uri("https://example.com/mcp")
+    },
+    httpClient,
+    ownsHttpClient: false);
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+</CodeGroup>
+
+## Transport Selection Guide
+
+### Use StdioClientTransport When:
+
+- Running a server as a child process
+- Developing locally with servers in different languages (Node.js, Python, .NET)
+- Need to pass environment variables or configure working directory
+- Server doesn't require network communication
+- Want to capture and process server stderr output
+
+### Use HttpClientTransport When:
+
+- Connecting to a remote MCP server over HTTP/HTTPS
+- Server is already running and accessible via URL
+- Need OAuth authentication
+- Require custom HTTP headers
+- Want to resume sessions (with Streamable HTTP mode)
+- Building web or cloud-based applications
+
+## Common Patterns
+
+### Error Handling
+
+```csharp
+try
+{
+    var transport = new StdioClientTransport(new StdioClientTransportOptions
+    {
+        Command = "node",
+        Arguments = ["server.js"]
+    });
+    
+    await using var client = await McpClient.CreateAsync(transport);
+    // Use client
+}
+catch (IOException ex)
+{
+    Console.WriteLine($"Failed to connect transport: {ex.Message}");
+}
+catch (McpException ex)
+{
+    Console.WriteLine($"MCP protocol error: {ex.Message}");
+}
+```
+
+### Logging
+
+```csharp
+using Microsoft.Extensions.Logging;
+
+var loggerFactory = LoggerFactory.Create(builder =>
+{
+    builder.AddConsole()
+           .SetMinimumLevel(LogLevel.Debug);
+});
+
+var transport = new StdioClientTransport(
+    new StdioClientTransportOptions
+    {
+        Command = "node",
+        Arguments = ["server.js"]
+    },
+    loggerFactory);
+
+await using var client = await McpClient.CreateAsync(transport, loggerFactory: loggerFactory);
+```
+
+## See Also
+
+- [McpClient](/api/core/mcp-client) - Client class using transports
+- [Authentication](/api/core/authentication) - OAuth authentication for HTTP transports
+- [MCP Specification - Transports](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) - Official transport specification

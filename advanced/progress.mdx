@@ -1,0 +1,217 @@
+---
+title: Progress Tracking
+description: Track progress for long-running operations with real-time updates
+---
+
+The MCP C# SDK provides built-in support for [progress tracking](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/progress) during long-running operations. This feature allows servers to send real-time progress updates to clients while processing tools, prompts, or resources.
+
+## Server Implementation
+
+### Sending Progress Notifications
+
+Servers can send progress updates using the `SendNotificationAsync` method on `McpServer`. The server must check if the client provided a `progressToken` in the request before sending notifications.
+
+<Steps>
+  <Step title="Accept McpServer in your tool">
+    Add `McpServer` and `RequestContext<CallToolRequestParams>` parameters to access the server instance and request context:
+
+    ```csharp
+    [McpServerTool]
+    [Description("Demonstrates a long running tool with progress updates")]
+    public static async Task<string> LongRunningTool(
+        McpServer server,
+        RequestContext<CallToolRequestParams> context,
+        int duration = 10,
+        int steps = 5)
+    {
+        var progressToken = context.Params?.ProgressToken;
+        // ...
+    }
+    ```
+  </Step>
+
+  <Step title="Check for progress token">
+    Verify that the client provided a `progressToken` before sending notifications:
+
+    ```csharp
+    if (progressToken is not null)
+    {
+        // Client requested progress updates
+    }
+    ```
+  </Step>
+
+  <Step title="Send progress notifications">
+    Use `SendNotificationAsync` with `ProgressNotificationParams` to report progress:
+
+    ```csharp
+    await server.SendNotificationAsync(
+        "notifications/progress",
+        new ProgressNotificationParams
+        {
+            ProgressToken = progressToken.Value,
+            Progress = new ProgressNotificationValue
+            {
+                Progress = i,
+                Total = steps,
+                Message = $"Step {i} of {steps} completed."
+            }
+        });
+    ```
+  </Step>
+</Steps>
+
+### Complete Server Example
+
+Here's a complete tool that performs work in steps and reports progress:
+
+```csharp ~/workspace/source/docs/concepts/progress/samples/server/Tools/LongRunningTools.cs
+using System.ComponentModel;
+using ModelContextProtocol;
+using ModelContextProtocol.Protocol;
+using ModelContextProtocol.Server;
+
+namespace Progress.Tools;
+
+[McpServerToolType]
+public class LongRunningTools
+{
+    [McpServerTool, Description("Demonstrates a long running tool with progress updates")]
+    public static async Task<string> LongRunningTool(
+        McpServer server,
+        RequestContext<CallToolRequestParams> context,
+        int duration = 10,
+        int steps = 5)
+    {
+        var progressToken = context.Params?.ProgressToken;
+        var stepDuration = duration / steps;
+
+        for (int i = 1; i <= steps; i++)
+        {
+            await Task.Delay(stepDuration * 1000);
+
+            if (progressToken is not null)
+            {
+                await server.SendNotificationAsync("notifications/progress", new ProgressNotificationParams
+                {
+                    ProgressToken = progressToken.Value,
+                    Progress = new ProgressNotificationValue
+                    {
+                        Progress = i,
+                        Total = steps,
+                        Message = $"Step {i} of {steps} completed.",
+                    },
+                });
+            }
+        }
+
+        return $"Long running tool completed. Duration: {duration} seconds. Steps: {steps}.";
+    }
+}
+```
+
+## Client Implementation
+
+Clients have two ways to receive progress updates: using a `Progress<T>` handler or registering a global notification handler.
+
+### Using Progress Handler (Recommended)
+
+The simplest approach is to pass a `Progress<ProgressNotificationValue>` instance when calling a tool:
+
+```csharp ~/workspace/source/docs/concepts/progress/samples/client/Program.cs
+var progressHandler = new Progress<ProgressNotificationValue>(value =>
+{
+    Console.WriteLine($"Tool progress: {value.Progress} of {value.Total} - {value.Message}");
+});
+
+var result = await mcpClient.CallToolAsync(
+    toolName: "longRunningTool",
+    progress: progressHandler);
+```
+
+This approach automatically:
+- Generates a unique `progressToken`
+- Sends it with the request
+- Routes progress notifications to your handler
+- Only receives updates for this specific request
+
+### Using Global Notification Handler
+
+For more control, register a global handler to receive all progress notifications:
+
+```csharp
+var progressToken = Guid.NewGuid().ToString();
+
+await using var handler = mcpClient.RegisterNotificationHandler(
+    NotificationMethods.ProgressNotification,
+    (notification, cancellationToken) =>
+    {
+        if (JsonSerializer.Deserialize<ProgressNotificationParams>(notification.Params) is { } pn &&
+            pn.ProgressToken == progressToken)
+        {
+            Console.WriteLine($"Tool progress: {pn.Progress.Progress} of {pn.Progress.Total} - {pn.Progress.Message}");
+        }
+        return ValueTask.CompletedTask;
+    });
+
+var result = await mcpClient.CallToolAsync(
+    new CallToolRequestParams
+    {
+        Name = "longRunningTool",
+        ProgressToken = progressToken
+    });
+```
+
+<Note>
+  The global handler receives **all** progress notifications from the server. You must filter by `progressToken` to identify notifications for your specific request.
+</Note>
+
+## Progress Notification Structure
+
+The `ProgressNotificationValue` contains:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `Progress` | `double` | Current progress value |
+| `Total` | `double?` | Total expected value (optional) |
+| `Message` | `string?` | Human-readable status message (optional) |
+
+## Best Practices
+
+<Accordion title="When to use progress tracking">
+  Use progress tracking for operations that:
+  - Take more than a few seconds
+  - Have measurable progress (e.g., processing items, steps in a workflow)
+  - Would benefit from user feedback during execution
+
+  Examples: image generation, batch processing, complex calculations, data imports
+</Accordion>
+
+<Accordion title="How often to send updates">
+  Balance between responsiveness and performance:
+  - **Too frequent**: Network overhead, client UI updates
+  - **Too infrequent**: Poor user experience
+  - **Recommended**: Every 1-5 seconds or 5-10% progress increments
+</Accordion>
+
+<Accordion title="Always check for progressToken">
+  Not all clients request progress updates. Always verify the token exists before sending notifications:
+
+  ```csharp
+  if (context.Params?.ProgressToken is { } token)
+  {
+      // Send progress
+  }
+  ```
+</Accordion>
+
+<Warning>
+  Servers are **not required** to support progress tracking. Clients should never depend on receiving progress updates and should implement appropriate timeouts.
+</Warning>
+
+## API Reference
+
+- [`McpServer.SendNotificationAsync`](https://github.com/modelcontextprotocol/csharp-sdk) - Send notifications from server
+- [`ProgressNotificationParams`](https://github.com/modelcontextprotocol/csharp-sdk) - Progress notification parameters
+- [`ProgressNotificationValue`](https://github.com/modelcontextprotocol/csharp-sdk) - Progress value structure
+- [`NotificationMethods`](https://github.com/modelcontextprotocol/csharp-sdk) - Notification method constants

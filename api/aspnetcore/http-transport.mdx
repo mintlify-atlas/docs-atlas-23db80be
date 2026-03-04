@@ -1,0 +1,242 @@
+---
+title: HTTP Transport
+description: Configure HTTP transport options for MCP ASP.NET Core servers
+---
+
+The `HttpServerTransportOptions` class configures the Streamable HTTP transport implementation for Model Context Protocol servers in ASP.NET Core.
+
+## HttpServerTransportOptions
+
+Configure HTTP transport behavior when calling `WithHttpTransport()`.
+
+### Properties
+
+<ParamField path="ConfigureSessionOptions" type="Func<HttpContext, McpServerOptions, CancellationToken, Task>?">
+  Optional callback to configure per-session `McpServerOptions` with access to the `HttpContext` of the request that initiated the session.
+  
+  Use this to customize server options based on the incoming request, such as filtering tools by route parameters or user claims.
+</ParamField>
+
+<ParamField path="RunSessionHandler" type="Func<HttpContext, McpServer, CancellationToken, Task>?">
+  Optional callback for running new MCP sessions manually.
+  
+  <Note>
+    This is an experimental API. The `HttpContext` parameter comes from the request that initiated the session and may not be usable after `McpServer.RunAsync()` starts. Consider using `ConfigureSessionOptions` instead.
+  </Note>
+  
+  Useful for running logic before a session starts and after it completes.
+</ParamField>
+
+<ParamField path="Stateless" type="bool" default="false">
+  Indicates whether the server runs in stateless mode without tracking state between requests, allowing for load balancing without session affinity.
+  
+  When `true`:
+  - `McpSession.SessionId` will be null
+  - "MCP-Session-Id" header is not used
+  - `RunSessionHandler` is called once per request
+  - "/sse" endpoint is disabled
+  - Unsolicited server-to-client messages are unsupported
+  - Server-to-client requests are unsupported
+  - Client sampling, elicitation, and roots capabilities are disabled
+</ParamField>
+
+<ParamField path="EventStreamStore" type="ISseEventStreamStore?">
+  Event store for resumability support. When set, events are stored and can be replayed when clients reconnect with a Last-Event-ID header.
+  
+  The server will:
+  - Generate unique event IDs for each SSE message
+  - Store events for later replay
+  - Replay missed events when a client reconnects with a Last-Event-ID header
+  - Send priming events to establish resumability before actual messages
+  
+  Can be set directly or resolved from DI. See [WithDistributedCacheEventStreamStore](#withdistributedcacheeventstreamstor) for automatic configuration.
+</ParamField>
+
+<ParamField path="SessionMigrationHandler" type="ISessionMigrationHandler?">
+  Session migration handler for cross-instance session migration.
+  
+  When configured, the server supports session migration between instances. If a request arrives with a session ID not found locally, the handler is consulted to determine if the session can be migrated from another instance.
+  
+  Can be set directly or resolved from DI.
+</ParamField>
+
+<ParamField path="PerSessionExecutionContext" type="bool" default="false">
+  Indicates whether the server uses a single execution context for the entire session.
+  
+  When `false`, handlers get called with the `ExecutionContext` belonging to the corresponding HTTP request.
+  
+  When `true`, handlers get called with the same `ExecutionContext` used for `ConfigureSessionOptions` and `RunSessionHandler`. Useful for setting `AsyncLocal<T>` variables that persist for the entire session, but prevents using `IHttpContextAccessor` in handlers.
+</ParamField>
+
+<ParamField path="IdleTimeout" type="TimeSpan" default="2 hours">
+  Duration the server waits between any active requests before timing out an MCP session.
+  
+  Checked in the background every 5 seconds. Clients trying to resume a timed-out session receive a 404 status code and should restart. Clients can keep sessions open by maintaining a GET request.
+</ParamField>
+
+<ParamField path="MaxIdleSessionCount" type="int" default="10000">
+  Maximum number of idle sessions to track in memory.
+  
+  When exceeded, the server logs a critical error and terminates the oldest idle sessions until the count is below this limit. Active sessions with open GET requests don't count towards this limit.
+</ParamField>
+
+<ParamField path="TimeProvider" type="TimeProvider" default="TimeProvider.System">
+  Time provider used for testing the `IdleTimeout`. Primarily for testing scenarios.
+</ParamField>
+
+## WithHttpTransport
+
+Extension method to add HTTP transport services to an MCP server.
+
+```csharp
+public static IMcpServerBuilder WithHttpTransport(
+    this IMcpServerBuilder builder,
+    Action<HttpServerTransportOptions>? configureOptions = null)
+```
+
+### Parameters
+
+<ParamField path="builder" type="IMcpServerBuilder" required>
+  The MCP server builder instance.
+</ParamField>
+
+<ParamField path="configureOptions" type="Action<HttpServerTransportOptions>?">
+  Optional callback to configure HTTP transport options.
+</ParamField>
+
+### Returns
+
+<ResponseField name="IMcpServerBuilder">
+  The builder instance for method chaining.
+</ResponseField>
+
+### Example
+
+<CodeGroup>
+```csharp Basic Usage
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithTools<MyTools>();
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+```csharp Per-Session Configuration
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.ConfigureSessionOptions = async (httpContext, mcpOptions, cancellationToken) =>
+        {
+            // Filter tools based on route parameter
+            var category = httpContext.Request.RouteValues["category"]?.ToString();
+            if (category == "admin")
+            {
+                mcpOptions.Capabilities = new();
+                mcpOptions.Capabilities.Tools = new();
+                // Add admin tools only
+            }
+        };
+    });
+```
+
+```csharp Stateless Mode
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.Stateless = true; // Enable stateless mode for load balancing
+        options.IdleTimeout = TimeSpan.FromMinutes(30);
+    });
+```
+</CodeGroup>
+
+## WithDistributedCacheEventStreamStore
+
+Registers a `DistributedCacheEventStreamStore` as the `ISseEventStreamStore` for SSE resumability.
+
+```csharp
+public static IMcpServerBuilder WithDistributedCacheEventStreamStore(
+    this IMcpServerBuilder builder,
+    Action<DistributedCacheEventStreamStoreOptions>? configureOptions = null)
+```
+
+<Note>
+  An `IDistributedCache` implementation must be registered in the service collection before calling this method.
+</Note>
+
+### Parameters
+
+<ParamField path="builder" type="IMcpServerBuilder" required>
+  The MCP server builder instance.
+</ParamField>
+
+<ParamField path="configureOptions" type="Action<DistributedCacheEventStreamStoreOptions>?">
+  Optional callback to configure event stream store options.
+</ParamField>
+
+### DistributedCacheEventStreamStoreOptions
+
+<ParamField path="Cache" type="IDistributedCache?">
+  The distributed cache instance to use for event storage. Automatically populated from DI if not set.
+</ParamField>
+
+<ParamField path="EventSlidingExpiration" type="TimeSpan?" default="30 minutes">
+  Sliding expiration for individual events. Events are refreshed on each access.
+</ParamField>
+
+<ParamField path="EventAbsoluteExpiration" type="TimeSpan?" default="2 hours">
+  Absolute expiration for individual events. Events are evicted after this period regardless of access.
+</ParamField>
+
+<ParamField path="MetadataSlidingExpiration" type="TimeSpan?" default="1 hour">
+  Sliding expiration for stream metadata (mode and completion status).
+</ParamField>
+
+<ParamField path="MetadataAbsoluteExpiration" type="TimeSpan?" default="4 hours">
+  Absolute expiration for stream metadata.
+</ParamField>
+
+<ParamField path="StreamReaderPollingInterval" type="TimeSpan" default="1 second">
+  Interval between polling attempts when a stream reader is waiting for new events. Shorter intervals provide lower latency but increase cache access frequency.
+</ParamField>
+
+### Example
+
+<CodeGroup>
+```csharp Redis Cache
+builder.Services.AddStackExchangeRedisCache(options =>
+{
+    options.Configuration = "localhost:6379";
+});
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithDistributedCacheEventStreamStore(options =>
+    {
+        options.EventSlidingExpiration = TimeSpan.FromMinutes(60);
+        options.EventAbsoluteExpiration = TimeSpan.FromHours(4);
+    });
+```
+
+```csharp SQL Server Cache
+builder.Services.AddDistributedSqlServerCache(options =>
+{
+    options.ConnectionString = builder.Configuration.GetConnectionString("DistCache");
+    options.SchemaName = "dbo";
+    options.TableName = "McpEventCache";
+});
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport()
+    .WithDistributedCacheEventStreamStore();
+```
+</CodeGroup>
+
+## Protocol Specification
+
+For details on the Streamable HTTP transport, see the [MCP Streamable HTTP specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports#streamable-http).
+
+The ASP.NET Core package also supports legacy HTTP with SSE endpoints at "/sse" and "/message" for backward compatibility. See the [HTTP with SSE specification](https://modelcontextprotocol.io/specification/2024-11-05/basic/transports#http-with-sse).

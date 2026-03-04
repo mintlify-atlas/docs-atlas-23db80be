@@ -1,0 +1,191 @@
+---
+title: Installation
+description: Install the MCP C# SDK packages and choose the right one for your project
+---
+
+# Installation
+
+The MCP C# SDK is distributed as three NuGet packages. Choose the package that best matches your scenario.
+
+## Choosing the Right Package
+
+The SDK provides three packages with different capabilities and dependencies:
+
+| Package | Use When | Dependencies |
+| ------- | -------- | ------------ |
+| **ModelContextProtocol.Core** | You only need the client or low-level server APIs and want the **minimum set of dependencies** | Microsoft.Extensions.AI.Abstractions, Microsoft.Extensions.Logging.Abstractions |
+| **ModelContextProtocol** | You're building a client or a **stdio-based server** and want hosting, dependency injection, and attribute-based discovery | Includes ModelContextProtocol.Core + Microsoft.Extensions.Hosting.Abstractions |
+| **ModelContextProtocol.AspNetCore** | You're building an **HTTP-based MCP server** hosted in ASP.NET Core | Includes ModelContextProtocol + ASP.NET Core framework |
+
+<Tip>
+  If you're unsure which package to choose, start with **ModelContextProtocol**. This is the right starting point for most projects. You can always add ModelContextProtocol.AspNetCore later if you need HTTP transport support.
+</Tip>
+
+## Core Package
+
+### When to Use
+
+Choose `ModelContextProtocol.Core` when you:
+- Only need to build an MCP client
+- Want to use low-level server APIs with minimal dependencies
+- Need the smallest possible package footprint
+- Don't require hosting or dependency injection features
+
+### Installation
+
+<CodeGroup>
+```bash .NET CLI
+dotnet add package ModelContextProtocol.Core
+```
+
+```bash Package Manager
+Install-Package ModelContextProtocol.Core
+```
+
+```xml PackageReference
+<PackageReference Include="ModelContextProtocol.Core" Version="*" />
+```
+</CodeGroup>
+
+### What's Included
+
+- `McpClient` - Connect to any MCP server
+- Low-level server types and interfaces
+- Protocol types and message structures
+- Transport implementations (stdio, HTTP, SSE)
+- Minimal external dependencies
+
+### Framework Support
+
+- .NET 10.0, 9.0, 8.0
+- .NET Standard 2.0
+- Native AOT compatible (except .NET Standard 2.0)
+
+## Main Package
+
+### When to Use
+
+Choose `ModelContextProtocol` when you:
+- Are building most client or server applications
+- Want attribute-based tool/prompt/resource discovery
+- Need dependency injection support
+- Want to use Microsoft.Extensions.Hosting for server lifecycle management
+- Are building a stdio-based MCP server
+
+### Installation
+
+<CodeGroup>
+```bash .NET CLI
+dotnet add package ModelContextProtocol
+```
+
+```bash Package Manager
+Install-Package ModelContextProtocol
+```
+
+```xml PackageReference
+<PackageReference Include="ModelContextProtocol" Version="*" />
+```
+</CodeGroup>
+
+### What's Included
+
+Everything from `ModelContextProtocol.Core`, plus:
+
+- `AddMcpServer()` - Service collection extensions for dependency injection
+- `WithStdioServerTransport()` - stdio transport for process-based servers
+- `WithToolsFromAssembly()` - Automatic tool discovery from attributes
+- `WithResources<T>()` and `WithPrompts<T>()` - Resource and prompt registration
+- Hosting integration with `IHostedService`
+- Caching and background service support
+
+### Framework Support
+
+- .NET 10.0, 9.0, 8.0
+- .NET Standard 2.0
+- Native AOT compatible (except .NET Standard 2.0)
+
+### Additional Dependencies
+
+For hosting support, you'll typically also install:
+
+```bash
+dotnet add package Microsoft.Extensions.Hosting
+```
+
+## AspNetCore Package
+
+### When to Use
+
+Choose `ModelContextProtocol.AspNetCore` when you:
+- Are building an HTTP-based MCP server
+- Want to host your MCP server in ASP.NET Core
+- Need to expose MCP over HTTP/HTTPS endpoints
+- Want to integrate MCP with existing ASP.NET Core applications
+- Need features like authentication, authorization, or CORS
+
+### Installation
+
+<CodeGroup>
+```bash .NET CLI
+dotnet add package ModelContextProtocol.AspNetCore
+```
+
+```bash Package Manager
+Install-Package ModelContextProtocol.AspNetCore
+```
+
+```xml PackageReference
+<PackageReference Include="ModelContextProtocol.AspNetCore" Version="*" />
+```
+</CodeGroup>
+
+### What's Included
+
+Everything from `ModelContextProtocol`, plus:
+
+- `WithHttpTransport()` - HTTP transport for ASP.NET Core servers
+- `MapMcp()` - Endpoint routing extensions
+- ASP.NET Core middleware integration
+- HttpContext access from tools and resources
+- Support for SSE (Server-Sent Events) streaming
+
+### Framework Support
+
+- .NET 10.0, 9.0, 8.0
+- Native AOT compatible
+
+<Note>
+  The AspNetCore package does not support .NET Standard 2.0 because it requires ASP.NET Core framework features.
+</Note>
+
+## Verification
+
+After installation, verify the package is correctly installed by checking your project file:
+
+```xml
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net9.0</TargetFramework>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="ModelContextProtocol" Version="1.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.0" />
+  </ItemGroup>
+</Project>
+```
+
+## Package Versions
+
+All three packages follow the same versioning scheme. Check NuGet for the latest stable version:
+
+- [ModelContextProtocol.Core](https://www.nuget.org/packages/ModelContextProtocol.Core)
+- [ModelContextProtocol](https://www.nuget.org/packages/ModelContextProtocol)
+- [ModelContextProtocol.AspNetCore](https://www.nuget.org/packages/ModelContextProtocol.AspNetCore)
+
+## Next Steps
+
+<Card title="Quick Start Guide" icon="rocket" href="/quickstart">
+  Build your first MCP client and server with step-by-step examples
+</Card>

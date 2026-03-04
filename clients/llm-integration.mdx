@@ -1,0 +1,325 @@
+---
+title: LLM Integration
+description: Use MCP tools with Microsoft.Extensions.AI for seamless LLM integration
+---
+
+The MCP C# SDK integrates seamlessly with [Microsoft.Extensions.AI](https://devblogs.microsoft.com/dotnet/introducing-microsoft-extensions-ai-preview/), allowing MCP tools to work directly with any `IChatClient` implementation.
+
+## Quick Start
+
+Connect to an MCP server and use its tools with an LLM:
+
+```csharp
+using Microsoft.Extensions.AI;
+using ModelContextProtocol.Client;
+using OpenAI;
+
+// Connect to MCP server
+var transport = new StdioClientTransport(new()
+{
+    Command = "npx",
+    Arguments = ["-y", "@modelcontextprotocol/server-everything"]
+});
+await using var mcpClient = await McpClient.CreateAsync(transport);
+
+// Get tools from server
+var tools = await mcpClient.ListToolsAsync();
+
+// Create LLM client
+using IChatClient chatClient = new OpenAIClient(apiKey)
+    .AsChatClient("gpt-4o")
+    .AsBuilder()
+    .UseFunctionInvocation()
+    .Build();
+
+// Chat with tools
+List<ChatMessage> messages = [
+    new(ChatRole.User, "What's the weather in Seattle?")
+];
+
+var response = await chatClient.GetResponseAsync(
+    messages,
+    new ChatOptions { Tools = [.. tools] }
+);
+
+Console.WriteLine(response.Message);
+```
+
+## MCP Tools as AIFunction
+
+MCP tools implement `AIFunction` from Microsoft.Extensions.AI, making them compatible with any `IChatClient`:
+
+```csharp
+await using var client = await McpClient.CreateAsync(transport);
+
+// List all available tools
+var tools = await client.ListToolsAsync();
+foreach (var tool in tools)
+{
+    Console.WriteLine($"Tool: {tool.Name}");
+    Console.WriteLine($"Description: {tool.Description}");
+}
+
+// Tools can be passed directly to ChatOptions
+var options = new ChatOptions
+{
+    Tools = [.. tools]
+};
+```
+
+## Streaming Conversations
+
+Use streaming for real-time responses:
+
+```csharp
+using Anthropic;
+using Microsoft.Extensions.AI;
+using ModelContextProtocol.Client;
+
+// Connect to server
+var transport = new StdioClientTransport(new()
+{
+    Command = "dotnet",
+    Arguments = ["run", "--project", "../WeatherServer"]
+});
+await using var mcpClient = await McpClient.CreateAsync(transport);
+var tools = await mcpClient.ListToolsAsync();
+
+// Create Anthropic client with function invocation
+using var chatClient = new AnthropicClient(apiKey)
+    .AsChatClient("claude-4.5-sonnet-20250514")
+    .AsBuilder()
+    .UseFunctionInvocation()
+    .Build();
+
+var messages = new List<ChatMessage>();
+var sb = new StringBuilder();
+
+while (true)
+{
+    Console.Write("You: ");
+    var input = Console.ReadLine();
+    if (string.IsNullOrWhiteSpace(input)) break;
+
+    messages.Add(new ChatMessage(ChatRole.User, input));
+
+    // Stream response
+    await foreach (var update in chatClient.GetStreamingResponseAsync(
+        messages,
+        new ChatOptions { Tools = [.. tools] }
+    ))
+    {
+        Console.Write(update);
+        sb.Append(update.ToString());
+    }
+
+    Console.WriteLine();
+    messages.Add(new ChatMessage(ChatRole.Assistant, sb.ToString()));
+    sb.Clear();
+}
+```
+
+## Multi-Provider Support
+
+The same MCP tools work with any Microsoft.Extensions.AI provider:
+
+<CodeGroup>
+
+```csharp OpenAI
+using OpenAI;
+
+var chatClient = new OpenAIClient(apiKey)
+    .AsChatClient("gpt-4o")
+    .AsBuilder()
+    .UseFunctionInvocation()
+    .Build();
+
+var response = await chatClient.GetResponseAsync(
+    messages,
+    new ChatOptions { Tools = [.. tools] }
+);
+```
+
+```csharp Anthropic
+using Anthropic;
+
+var chatClient = new AnthropicClient(apiKey)
+    .AsChatClient("claude-4.5-sonnet-20250514")
+    .AsBuilder()
+    .UseFunctionInvocation()
+    .Build();
+
+var response = await chatClient.GetResponseAsync(
+    messages,
+    new ChatOptions { Tools = [.. tools] }
+);
+```
+
+```csharp Ollama
+using OllamaSharp;
+
+var chatClient = new OllamaChatClient(
+    new Uri("http://localhost:11434"),
+    "llama3"
+)
+.AsBuilder()
+.UseFunctionInvocation()
+.Build();
+
+var response = await chatClient.GetResponseAsync(
+    messages,
+    new ChatOptions { Tools = [.. tools] }
+);
+```
+
+</CodeGroup>
+
+## Tool Execution
+
+The `UseFunctionInvocation()` middleware automatically handles tool calls. You can also invoke tools manually:
+
+```csharp
+await using var client = await McpClient.CreateAsync(transport);
+
+// Call a tool directly
+var result = await client.CallToolAsync(
+    "get_weather",
+    new Dictionary<string, object?>
+    {
+        ["location"] = "Seattle, WA",
+        ["unit"] = "fahrenheit"
+    }
+);
+
+// Extract text content
+var textContent = result.Content
+    .OfType<TextContentBlock>()
+    .FirstOrDefault()?.Text;
+
+Console.WriteLine(textContent);
+```
+
+## Progress Reporting
+
+Monitor tool execution progress:
+
+```csharp
+var progress = new Progress<ProgressNotificationValue>(p =>
+{
+    Console.WriteLine($"Progress: {p.Progress}/{p.Total}");
+});
+
+var result = await client.CallToolAsync(
+    "long_running_task",
+    arguments: null,
+    progress: progress
+);
+```
+
+## Tool Discovery
+
+React to tool list changes:
+
+```csharp
+await using var disposable = client.RegisterNotificationHandler(
+    NotificationMethods.ToolListChangedNotification,
+    async (notification, cancellationToken) =>
+    {
+        Console.WriteLine("Tool list changed, refreshing...");
+        var tools = await client.ListToolsAsync();
+        // Update your ChatOptions with new tools
+    }
+);
+```
+
+## Complete Example
+
+Here's a complete interactive chat application:
+
+```csharp
+using Microsoft.Extensions.AI;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Hosting;
+using ModelContextProtocol.Client;
+using OpenAI;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Configuration
+    .AddEnvironmentVariables()
+    .AddUserSecrets<Program>();
+
+// Connect to MCP server
+var transport = new StdioClientTransport(new()
+{
+    Command = "npx",
+    Arguments = ["-y", "@modelcontextprotocol/server-everything"],
+    Name = "Everything Server"
+});
+await using var mcpClient = await McpClient.CreateAsync(transport);
+
+// Get available tools
+var tools = await mcpClient.ListToolsAsync();
+Console.WriteLine($"Connected with {tools.Count} tools available");
+
+// Create LLM client
+using var chatClient = new OpenAIClient(
+    builder.Configuration["OPENAI_API_KEY"]
+)
+.AsChatClient("gpt-4o")
+.AsBuilder()
+.UseFunctionInvocation()
+.Build();
+
+var messages = new List<ChatMessage>();
+var options = new ChatOptions
+{
+    Tools = [.. tools]
+};
+
+Console.WriteLine("Chat started! Type 'exit' to quit.\n");
+
+while (true)
+{
+    Console.Write("You: ");
+    var input = Console.ReadLine();
+    
+    if (string.IsNullOrWhiteSpace(input) || 
+        input.Equals("exit", StringComparison.OrdinalIgnoreCase))
+    {
+        break;
+    }
+
+    messages.Add(new ChatMessage(ChatRole.User, input));
+
+    var response = await chatClient.GetResponseAsync(messages, options);
+    
+    Console.WriteLine($"Assistant: {response.Message}");
+    messages.Add(response.Message);
+}
+```
+
+## Best Practices
+
+<Tip>
+**Always enable function invocation**: Use `.UseFunctionInvocation()` in your `IChatClient` builder to automatically handle tool calls.
+</Tip>
+
+<Warning>
+**Dispose clients properly**: Always use `await using` with `McpClient` to ensure proper cleanup of server processes and connections.
+</Warning>
+
+<Note>
+**Tool updates**: Register handlers for `ToolListChangedNotification` to stay synchronized when servers add or remove tools dynamically.
+</Note>
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="Sampling" icon="wand-magic-sparkles" href="/clients/sampling">
+    Handle server sampling requests
+  </Card>
+  <Card title="Roots" icon="folder-tree" href="/clients/roots">
+    Provide filesystem roots to servers
+  </Card>
+</CardGroup>

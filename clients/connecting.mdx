@@ -1,0 +1,285 @@
+---
+title: Connecting to Servers
+description: Learn how to connect MCP clients to servers using stdio and HTTP transports
+---
+
+MCP clients connect to servers using transports. The C# SDK provides two main transport types: **stdio** for local process communication and **HTTP** for remote server connections.
+
+## Creating a Client
+
+Use `McpClient.CreateAsync` to connect to a server:
+
+```csharp
+using ModelContextProtocol.Client;
+
+IClientTransport transport = new StdioClientTransport(new()
+{
+    Command = "npx",
+    Arguments = ["-y", "@modelcontextprotocol/server-everything"]
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+The client automatically performs the initialization handshake and negotiates capabilities with the server.
+
+## stdio Transport
+
+The stdio transport launches a server as a child process and communicates over standard input/output streams.
+
+### Basic Configuration
+
+```csharp
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "dotnet",
+    Arguments = ["run", "--project", "../MyMcpServer"],
+    Name = "My Local Server"
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Advanced Configuration
+
+Configure working directory, environment variables, and shutdown timeout:
+
+```csharp
+var transport = new StdioClientTransport(new StdioClientTransportOptions
+{
+    Command = "python",
+    Arguments = ["server.py"],
+    WorkingDirectory = "/path/to/server",
+    EnvironmentVariables = new Dictionary<string, string?>
+    {
+        ["API_KEY"] = Environment.GetEnvironmentVariable("API_KEY"),
+        ["DEBUG"] = "true"
+    },
+    ShutdownTimeout = TimeSpan.FromSeconds(10),
+    StandardErrorLines = line => Console.WriteLine($"Server stderr: {line}")
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### stdio Transport Options
+
+| Property | Description |
+|----------|-------------|
+| `Command` | Executable to launch (required) |
+| `Arguments` | Command-line arguments |
+| `WorkingDirectory` | Working directory for the process |
+| `EnvironmentVariables` | Environment variables to set |
+| `ShutdownTimeout` | Graceful shutdown timeout (default: 5 seconds) |
+| `StandardErrorLines` | Callback for stderr output |
+| `Name` | Transport identifier for logging |
+
+<Note>
+On Windows, non-shell commands are automatically wrapped with `cmd.exe /c` to ensure proper stdio communication.
+</Note>
+
+## HTTP Transport
+
+The HTTP transport connects to remote MCP servers over HTTP using either Streamable HTTP or SSE (Server-Sent Events) protocols.
+
+### Streamable HTTP (Recommended)
+
+Streamable HTTP is the modern, bidirectional transport protocol:
+
+```csharp
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://my-mcp-server.example.com/mcp"),
+    TransportMode = HttpTransportMode.StreamableHttp
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Auto-Detection
+
+By default, the client auto-detects the transport mode, trying Streamable HTTP first and falling back to SSE:
+
+```csharp
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://my-mcp-server.example.com/mcp")
+    // TransportMode defaults to HttpTransportMode.AutoDetect
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Custom Headers
+
+Add custom HTTP headers for authentication or other purposes:
+
+```csharp
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://my-mcp-server.example.com/mcp"),
+    AdditionalHeaders = new Dictionary<string, string>
+    {
+        ["X-API-Key"] = "your-api-key",
+        ["X-Custom-Header"] = "value"
+    }
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Using a Custom HttpClient
+
+Provide your own `HttpClient` instance for advanced scenarios:
+
+```csharp
+var handler = new SocketsHttpHandler
+{
+    PooledConnectionLifetime = TimeSpan.FromMinutes(2),
+    PooledConnectionIdleTimeout = TimeSpan.FromMinutes(1)
+};
+var httpClient = new HttpClient(handler);
+
+var transport = new HttpClientTransport(
+    new HttpClientTransportOptions
+    {
+        Endpoint = new Uri("http://localhost:3001")
+    },
+    httpClient,
+    ownsHttpClient: false
+);
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### HTTP Transport Options
+
+| Property | Description |
+|----------|-------------|
+| `Endpoint` | Server base URI (required) |
+| `TransportMode` | Transport protocol mode (default: AutoDetect) |
+| `ConnectionTimeout` | Connection timeout (default: 30 seconds) |
+| `AdditionalHeaders` | Custom HTTP headers |
+| `KnownSessionId` | Session ID for resumption |
+| `OwnsSession` | Whether to send DELETE on dispose (default: true) |
+| `MaxReconnectionAttempts` | SSE reconnection attempts (default: 5) |
+| `DefaultReconnectionInterval` | SSE reconnection delay (default: 1 second) |
+| `Name` | Transport identifier for logging |
+
+## Session Resumption
+
+Streamable HTTP supports session resumption for reconnecting to an existing server session:
+
+```csharp
+// First session - capture session info
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://my-mcp-server.example.com/mcp")
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+var sessionId = /* capture from transport */;
+var serverCapabilities = client.ServerCapabilities;
+var serverInfo = client.ServerInfo;
+
+// Later - resume the session
+var resumeTransport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://my-mcp-server.example.com/mcp"),
+    KnownSessionId = sessionId
+});
+
+await using var resumedClient = await McpClient.ResumeSessionAsync(
+    resumeTransport,
+    new ResumeClientSessionOptions
+    {
+        ServerCapabilities = serverCapabilities,
+        ServerInfo = serverInfo
+    }
+);
+```
+
+## Client Options
+
+Configure client capabilities and behavior:
+
+```csharp
+var options = new McpClientOptions
+{
+    ClientInfo = new Implementation
+    {
+        Name = "My MCP Client",
+        Version = "1.0.0"
+    },
+    Capabilities = new ClientCapabilities
+    {
+        Sampling = new SamplingCapability(),
+        Roots = new RootsCapability { ListChanged = true }
+    },
+    ProtocolVersion = null, // Use latest version
+    InitializationTimeout = TimeSpan.FromSeconds(60)
+};
+
+await using var client = await McpClient.CreateAsync(transport, options);
+```
+
+## Accessing Server Information
+
+After connection, access server capabilities and metadata:
+
+```csharp
+await using var client = await McpClient.CreateAsync(transport);
+
+// Server capabilities
+ServerCapabilities capabilities = client.ServerCapabilities;
+if (capabilities.Tools is not null)
+{
+    Console.WriteLine("Server supports tools");
+}
+
+// Server implementation info
+Implementation serverInfo = client.ServerInfo;
+Console.WriteLine($"Connected to {serverInfo.Name} v{serverInfo.Version}");
+
+// Server instructions (hints for LLMs)
+string? instructions = client.ServerInstructions;
+if (instructions is not null)
+{
+    Console.WriteLine($"Server instructions: {instructions}");
+}
+```
+
+## Session Completion
+
+Monitor when the client session completes:
+
+```csharp
+await using var client = await McpClient.CreateAsync(transport);
+
+// Wait for completion (in background task)
+_ = Task.Run(async () =>
+{
+    ClientCompletionDetails details = await client.Completion;
+    if (details.Exception is null)
+    {
+        Console.WriteLine("Session closed gracefully");
+    }
+    else
+    {
+        Console.WriteLine($"Session failed: {details.Exception.Message}");
+    }
+});
+
+// Use the client...
+```
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="LLM Integration" icon="brain" href="/clients/llm-integration">
+    Use MCP tools with Microsoft.Extensions.AI
+  </Card>
+  <Card title="Sampling" icon="wand-magic-sparkles" href="/clients/sampling">
+    Handle server sampling requests
+  </Card>
+</CardGroup>

@@ -1,0 +1,218 @@
+---
+title: Contributing
+description: Guidelines for contributing to the MCP C# SDK
+---
+
+Thank you for your interest in contributing to the Model Context Protocol (MCP) C# SDK! This guide provides everything you need to know to contribute effectively.
+
+<Note>
+One of the easiest ways to contribute is to participate in discussions on GitHub issues. You can also contribute by submitting pull requests with code changes.
+</Note>
+
+Also see the [overall MCP communication guidelines](https://modelcontextprotocol.io/community/communication), which explains how and where discussions about changes happen.
+
+## Code of Conduct
+
+This project follows the [Contributor Covenant Code of Conduct](https://github.com/modelcontextprotocol/modelcontextprotocol/blob/main/CODE_OF_CONDUCT.md). By participating, you are expected to uphold this code.
+
+## Bugs and Feature Requests
+
+<Warning>
+**If you want to report a security-related issue**, please see the [Reporting security issues](SECURITY.md#reporting-security-issues) section of SECURITY.md.
+</Warning>
+
+Before reporting a new issue:
+
+1. **Search for existing issues** to see if one already exists
+2. **Upvote** (👍) existing issues that affect you
+3. **Add a comment** with your unique scenarios and requirements
+4. **Open a new issue** if you can't find an existing one
+
+Upvotes and clear details on the issue's impact help us prioritize the most important issues to be worked on sooner rather than later.
+
+<Card title="Open an Issue" icon="github" href="https://github.com/modelcontextprotocol/csharp-sdk/issues">
+  Report bugs or request features on GitHub
+</Card>
+
+## Prerequisites
+
+Before you begin, ensure you have the following installed:
+
+### Required Tools
+
+- **.NET SDK 10.0 or later** - Required to build and test the project
+  - Download from [dotnet.microsoft.com/download](https://dotnet.microsoft.com/download)
+  - Verify installation: `dotnet --version`
+
+<Note>
+The dev container configuration in this repository includes all the necessary tools and SDKs to get started quickly.
+</Note>
+
+## Building the Project
+
+From the root directory of the repository, run:
+
+```bash
+dotnet build
+```
+
+This builds all projects in the solution with warnings treated as errors.
+
+## Running Tests
+
+### Run All Tests
+
+From the root directory, run:
+
+```bash
+dotnet test
+```
+
+<Accordion title="Tests requiring Docker">
+  Some tests require Docker to be installed and running locally. If Docker is not available, those tests will be skipped.
+</Accordion>
+
+<Accordion title="Tests requiring external credentials">
+  Some tests require credentials for external services. When these are not available, those tests will be skipped.
+  
+  Use the following environment variables to provide credentials:
+  - `AI:OpenAI:ApiKey` - OpenAI API Key
+</Accordion>
+
+### Run Tests for a Specific Project
+
+```bash
+dotnet test tests/ModelContextProtocol.Tests/
+```
+
+Tools like Visual Studio, JetBrains Rider, and VS Code also provide integrated test runners that can be used to run and debug individual tests.
+
+## Building the Documentation
+
+This project uses [DocFX](https://dotnet.github.io/docfx/) to generate its conceptual and reference documentation.
+
+To view the documentation locally, run the following command from the root directory:
+
+```bash
+make serve-docs
+```
+
+Then open your browser and navigate to `http://localhost:8080`.
+
+## Submitting Pull Requests
+
+We are always happy to see PRs from community members both for bug fixes as well as new features. Here are a few simple rules to follow when you prepare to contribute to our codebase:
+
+### Finding an Issue to Work On
+
+Issues that are good candidates for first-time contributors are marked with the `good first issue` label. Those do not require too much familiarity with the framework and are more novice-friendly.
+
+<Note>
+If you want to contribute a change that is not covered by an existing issue, first open an issue with a description of the change you would like to make and the problem it solves so it can be discussed before a pull request is submitted.
+</Note>
+
+**Assign yourself to the issue** so others know you are working on it.
+
+### Before Writing Code
+
+For all but the smallest changes, it's a good idea to create a design document or at least a high-level description of your approach and share it in the issue for feedback before you start coding.
+
+This helps ensure that your approach aligns with the project's goals and avoids wasted effort.
+
+### Before Submitting the Pull Request
+
+Before submitting a pull request, make sure that it checks the following requirements:
+
+<CardGroup cols={2}>
+  <Card title="Code Style" icon="paintbrush">
+    The code follows the repository's style guidelines
+  </Card>
+  <Card title="Tests" icon="vial">
+    Tests are included for new features or bug fixes
+  </Card>
+  <Card title="Passing Tests" icon="circle-check">
+    All existing and new tests pass locally
+  </Card>
+  <Card title="Error Handling" icon="shield-halved">
+    Appropriate error handling has been added
+  </Card>
+  <Card title="Documentation" icon="book">
+    Documentation has been updated as needed
+  </Card>
+</CardGroup>
+
+When submitting the pull request, provide a clear description of the changes made and reference the issue it addresses.
+
+### During Pull Request Review
+
+A project maintainer will review your pull request and provide feedback.
+
+<Note>
+Be prepared to make changes based on feedback. The review process helps maintain code quality and ensures consistency across the project.
+</Note>
+
+## Development Workflow
+
+<Accordion title="1. Fork and clone the repository">
+  Fork the repository on GitHub and clone your fork locally.
+  
+  ```bash
+  git clone https://github.com/YOUR-USERNAME/csharp-sdk.git
+  cd csharp-sdk
+  ```
+</Accordion>
+
+<Accordion title="2. Create a branch">
+  Create a new branch for your changes.
+  
+  ```bash
+  git checkout -b my-feature-branch
+  ```
+</Accordion>
+
+<Accordion title="3. Make your changes">
+  Make your changes, following the project's coding standards and guidelines.
+</Accordion>
+
+<Accordion title="4. Test your changes">
+  Run the full test suite to ensure your changes don't break existing functionality.
+  
+  ```bash
+  dotnet test
+  ```
+</Accordion>
+
+<Accordion title="5. Commit and push">
+  Commit your changes with a clear, descriptive commit message.
+  
+  ```bash
+  git add .
+  git commit -m "Add feature X"
+  git push origin my-feature-branch
+  ```
+</Accordion>
+
+<Accordion title="6. Open a pull request">
+  Open a pull request on GitHub from your branch to the main repository.
+</Accordion>
+
+## License
+
+By contributing, you agree that your contributions will be licensed under the Apache License 2.0.
+
+## Next Steps
+
+<CardGroup cols={2}>
+  <Card title="View Issues" icon="bug" href="https://github.com/modelcontextprotocol/csharp-sdk/issues">
+    Find an issue to work on
+  </Card>
+  <Card title="Discussions" icon="comments" href="https://github.com/modelcontextprotocol/csharp-sdk/discussions">
+    Join the conversation
+  </Card>
+  <Card title="Roadmap" icon="map" href="/resources/roadmap">
+    See what's planned for future releases
+  </Card>
+  <Card title="Versioning" icon="code-branch" href="/resources/versioning">
+    Understand the versioning policy
+  </Card>
+</CardGroup>

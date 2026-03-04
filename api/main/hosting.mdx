@@ -1,0 +1,314 @@
+---
+title: 'Hosting and DI Integration'
+description: 'Dependency injection integration for MCP servers with Microsoft.Extensions.DependencyInjection'
+---
+
+## Overview
+
+The MCP C# SDK integrates with the Microsoft Dependency Injection framework through the `ModelContextProtocol` package. This enables MCP servers to leverage the full DI ecosystem including service lifetimes, configuration, logging, and hosted services.
+
+## AddMcpServer Extension Method
+
+### Signature
+
+```csharp
+public static IMcpServerBuilder AddMcpServer(
+    this IServiceCollection services, 
+    Action<McpServerOptions>? configureOptions = null)
+```
+
+### Description
+
+Adds the Model Context Protocol (MCP) server to the service collection with default options. This is the entry point for configuring an MCP server using dependency injection.
+
+<ParamField path="services" type="IServiceCollection" required>
+  The service collection to add the MCP server to.
+</ParamField>
+
+<ParamField path="configureOptions" type="Action<McpServerOptions>">
+  Optional callback to configure the `McpServerOptions`. Use this to set server metadata, capabilities, and handler configurations.
+</ParamField>
+
+### Returns
+
+An `IMcpServerBuilder` instance that can be used to further configure the MCP server through fluent method chaining.
+
+## Usage Examples
+
+### Basic Console Server
+
+```csharp
+using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
+using ModelContextProtocol.Server;
+
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddMcpServer(options =>
+{
+    options.ServerInfo = new Implementation
+    {
+        Name = "Weather Server",
+        Version = "1.0.0",
+        Description = "Provides weather information"
+    };
+})
+.WithTools<WeatherTools>()
+.WithStdioServerTransport();
+
+var host = builder.Build();
+await host.RunAsync();
+```
+
+### ASP.NET Core Server
+
+```csharp
+using ModelContextProtocol.Server;
+using ModelContextProtocol.Protocol;
+
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer(options =>
+{
+    options.ServerInfo = new Implementation
+    {
+        Name = "Everything Server",
+        Version = "1.0.0",
+        Title = "MCP Everything Server",
+        Description = "A comprehensive MCP server",
+        WebsiteUrl = "https://github.com/modelcontextprotocol/csharp-sdk",
+        Icons = [
+            new Icon
+            {
+                Source = "https://example.com/icon.svg",
+                MimeType = "image/svg+xml",
+                Sizes = ["any"],
+                Theme = "light"
+            }
+        ]
+    };
+})
+.WithHttpTransport()
+.WithTools<AddTool>()
+.WithPrompts<SimplePromptType>()
+.WithResources<SimpleResourceType>();
+
+var app = builder.Build();
+app.MapMcp();
+app.Run();
+```
+
+### With Custom Services
+
+```csharp
+builder.Services.AddHttpClient();
+builder.Services.AddSingleton<IWeatherService, WeatherService>();
+builder.Services.AddScoped<IDatabaseContext, DatabaseContext>();
+
+builder.Services.AddMcpServer()
+    .WithTools<WeatherTools>()  // Can inject IWeatherService
+    .WithResources<DatabaseResources>()  // Can inject IDatabaseContext
+    .WithStdioServerTransport();
+```
+
+## Service Registration Details
+
+### What Gets Registered
+
+When you call `AddMcpServer()`, the following services are registered:
+
+1. **Options Configuration**: Registers `IConfigureOptions<McpServerOptions>` with `McpServerOptionsSetup`
+2. **Server Builder**: Creates and returns a `DefaultMcpServerBuilder` wrapping the service collection
+3. **Tool/Prompt/Resource Instances**: Each `WithTools()`, `WithPrompts()`, or `WithResources()` call registers singleton instances
+
+### Service Lifetimes
+
+<CodeGroup>
+```csharp Singleton
+// McpServerTool, McpServerPrompt, McpServerResource are registered as singletons
+builder.Services.AddMcpServer()
+    .WithTools<MyTools>();  // Singleton McpServerTool instances
+```
+
+```csharp Transient (Tool Methods)
+// Tool methods can inject services with any lifetime
+[McpServerTool]
+public async Task<string> GetWeather(
+    string city,
+    IWeatherService weatherService,  // Resolved from DI per invocation
+    CancellationToken cancellationToken)
+{
+    return await weatherService.GetWeatherAsync(city, cancellationToken);
+}
+```
+</CodeGroup>
+
+## Dependency Injection in Tools
+
+### Constructor Injection
+
+When using instance methods for tools, the tool class is instantiated per invocation and can use constructor injection:
+
+```csharp
+[McpServerToolType]
+public class WeatherTools
+{
+    private readonly IWeatherService _weatherService;
+    private readonly ILogger<WeatherTools> _logger;
+
+    public WeatherTools(IWeatherService weatherService, ILogger<WeatherTools> logger)
+    {
+        _weatherService = weatherService;
+        _logger = logger;
+    }
+
+    [McpServerTool(Name = "get_weather")]
+    [Description("Get current weather for a city")]
+    public async Task<string> GetWeather(string city, CancellationToken cancellationToken)
+    {
+        _logger.LogInformation("Fetching weather for {City}", city);
+        return await _weatherService.GetWeatherAsync(city, cancellationToken);
+    }
+}
+```
+
+### Method Parameter Injection
+
+Tool methods can also inject services directly as parameters:
+
+```csharp
+[McpServerTool]
+public static async Task<string> GetWeather(
+    string city,
+    IWeatherService weatherService,  // Injected from DI
+    ILogger<WeatherTools> logger,    // Injected from DI
+    CancellationToken cancellationToken)  // Provided by MCP server
+{
+    logger.LogInformation("Fetching weather for {City}", city);
+    return await weatherService.GetWeatherAsync(city, cancellationToken);
+}
+```
+
+### Special Parameters
+
+The following parameter types are automatically bound and **not** included in the tool's JSON schema:
+
+- `CancellationToken` - Bound to the request cancellation token
+- `IServiceProvider` - Bound to the request's service provider
+- `McpServer` - Bound to the server instance
+- `IProgress<ProgressNotificationValue>` - For progress reporting
+- Any parameter satisfiable by the `IServiceProvider` (checked via `IServiceProviderIsService`)
+- Any parameter marked with `[FromKeyedServices]`
+
+## Integration with Hosted Services
+
+### Single-Session Server
+
+When using `WithStdioServerTransport()` or `WithStreamServerTransport()`, a `SingleSessionMcpServerHostedService` is automatically registered:
+
+```csharp
+var builder = Host.CreateApplicationBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithTools<MyTools>()
+    .WithStdioServerTransport();  // Registers SingleSessionMcpServerHostedService
+
+var host = builder.Build();
+await host.RunAsync();  // Server runs until stdin closes
+```
+
+### HTTP Transport (Multi-Session)
+
+HTTP transport supports multiple concurrent sessions:
+
+```csharp
+var builder = WebApplication.CreateBuilder(args);
+
+builder.Services.AddMcpServer()
+    .WithHttpTransport(options =>
+    {
+        options.RunSessionHandler = async (httpContext, mcpServer, token) =>
+        {
+            // Custom per-session initialization
+            await mcpServer.RunAsync(token);
+        };
+    })
+    .WithTools<MyTools>();
+
+var app = builder.Build();
+app.MapMcp();  // Maps MCP endpoints
+app.Run();
+```
+
+## Configuration
+
+### From appsettings.json
+
+```json
+{
+  "McpServer": {
+    "ServerInfo": {
+      "Name": "My Server",
+      "Version": "1.0.0"
+    }
+  }
+}
+```
+
+```csharp
+builder.Services.Configure<McpServerOptions>(
+    builder.Configuration.GetSection("McpServer"));
+
+builder.Services.AddMcpServer();
+```
+
+### Manual Configuration
+
+```csharp
+builder.Services.AddMcpServer(options =>
+{
+    options.ServerInfo = new Implementation
+    {
+        Name = "My Server",
+        Version = "1.0.0"
+    };
+    
+    options.Capabilities = new ServerCapabilities
+    {
+        Tools = new(),
+        Prompts = new(),
+        Resources = new ResourcesCapability
+        {
+            Subscribe = true
+        }
+    };
+});
+```
+
+## Implementation Details
+
+### DefaultMcpServerBuilder
+
+The internal implementation of `IMcpServerBuilder`:
+
+```csharp
+internal sealed class DefaultMcpServerBuilder : IMcpServerBuilder
+{
+    public IServiceCollection Services { get; }
+
+    public DefaultMcpServerBuilder(IServiceCollection services)
+    {
+        Services = services;
+    }
+}
+```
+
+### McpServerOptionsSetup
+
+A transient `IConfigureOptions<McpServerOptions>` that applies default configuration.
+
+## See Also
+
+- [IMcpServerBuilder](/api/main/server-builder) - Builder extension methods
+- [Server Attributes](/api/main/attributes) - Attribute-based tool/prompt/resource registration
+- [Protocol Types](/api/core/protocol-types) - MCP protocol types and configuration

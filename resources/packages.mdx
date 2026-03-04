@@ -1,0 +1,111 @@
+---
+title: Packages
+description: Overview of MCP C# SDK packages and selection guide
+---
+
+The MCP C# SDK consists of three main NuGet packages, each designed for specific use cases. Choose the package that best fits your project's requirements.
+
+## Available Packages
+
+<CardGroup cols={3}>
+  <Card title="ModelContextProtocol.Core" icon="cube" href="https://www.nuget.org/packages/ModelContextProtocol.Core">
+    Core client and low-level server APIs with minimal dependencies
+  </Card>
+  <Card title="ModelContextProtocol" icon="box" href="https://www.nuget.org/packages/ModelContextProtocol">
+    Main package with hosting and dependency injection extensions
+  </Card>
+  <Card title="ModelContextProtocol.AspNetCore" icon="server" href="https://www.nuget.org/packages/ModelContextProtocol.AspNetCore">
+    HTTP-based MCP server capabilities for ASP.NET Core
+  </Card>
+</CardGroup>
+
+## Package Details
+
+### ModelContextProtocol.Core
+
+[![NuGet version](https://img.shields.io/nuget/v/ModelContextProtocol.Core.svg)](https://www.nuget.org/packages/ModelContextProtocol.Core)
+
+**Best for:** Projects that only need client functionality or low-level server APIs with minimal dependencies.
+
+**Key Features:**
+- MCP client implementation
+- Low-level server APIs
+- Core protocol types and utilities
+- Minimal dependency footprint
+
+**Installation:**
+```bash
+dotnet add package ModelContextProtocol.Core
+```
+
+### ModelContextProtocol
+
+[![NuGet version](https://img.shields.io/nuget/v/ModelContextProtocol.svg)](https://www.nuget.org/packages/ModelContextProtocol)
+
+**Best for:** Most projects that don't need HTTP server capabilities.
+
+**Key Features:**
+- All features from `ModelContextProtocol.Core`
+- Hosting extensions
+- Dependency injection support
+- Server builder APIs
+
+**Installation:**
+```bash
+dotnet add package ModelContextProtocol
+```
+
+<Note>
+This is the recommended package for most server implementations using stdio or other non-HTTP transports.
+</Note>
+
+### ModelContextProtocol.AspNetCore
+
+[![NuGet version](https://img.shields.io/nuget/v/ModelContextProtocol.AspNetCore.svg)](https://www.nuget.org/packages/ModelContextProtocol.AspNetCore)
+
+**Best for:** HTTP-based MCP server implementations.
+
+**Key Features:**
+- All features from `ModelContextProtocol`
+- ASP.NET Core integration
+- HTTP transport support
+- SSE (Server-Sent Events) capabilities
+
+**Installation:**
+```bash
+dotnet add package ModelContextProtocol.AspNetCore
+```
+
+## Package Selection Guide
+
+Use this decision tree to select the right package:
+
+<Accordion title="I'm building an MCP client">
+  Use **ModelContextProtocol.Core** for the minimal dependency footprint, or **ModelContextProtocol** if you need hosting and dependency injection features.
+</Accordion>
+
+<Accordion title="I'm building an MCP server with stdio transport">
+  Use **ModelContextProtocol** for hosting and dependency injection support.
+</Accordion>
+
+<Accordion title="I'm building an HTTP-based MCP server">
+  Use **ModelContextProtocol.AspNetCore** for full ASP.NET Core integration.
+</Accordion>
+
+<Accordion title="I need low-level APIs with minimal dependencies">
+  Use **ModelContextProtocol.Core** for the smallest footprint.
+</Accordion>
+
+## Version Compatibility
+
+All three packages follow the same versioning scheme and are released together. When using multiple packages, ensure they are all on the same version to avoid compatibility issues.
+
+<Warning>
+Mixing different versions of MCP packages in the same project can lead to runtime errors and unexpected behavior.
+</Warning>
+
+## Next Steps
+
+- Review the [versioning policy](/resources/versioning) to understand SDK updates
+- Check the [roadmap](/resources/roadmap) for upcoming features
+- Read the [contributing guide](/resources/contributing) to contribute to the SDK

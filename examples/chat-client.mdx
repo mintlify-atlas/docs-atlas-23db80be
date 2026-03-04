@@ -1,0 +1,275 @@
+---
+title: "Chat Client with Tools"
+description: "Build an AI chat client that uses MCP tools with Microsoft.Extensions.AI"
+---
+
+The ChatWithTools example demonstrates how to build an AI-powered chat client that connects to an MCP server and uses its tools. This example integrates OpenAI with the MCP C# SDK and Microsoft.Extensions.AI to create a conversational interface with tool calling capabilities.
+
+## What You'll Build
+
+An interactive chat application that:
+- Connects to an MCP server via stdio transport
+- Lists available tools from the server
+- Uses OpenAI's GPT-4 to have conversations
+- Automatically calls MCP tools when needed
+- Includes OpenTelemetry instrumentation for observability
+
+## Complete Example Code
+
+<Steps>
+  <Step title="Set up OpenTelemetry and logging">
+    Configure observability providers for tracing, metrics, and logging.
+
+    ```csharp Program.cs (part 1)
+    using Microsoft.Extensions.AI;
+    using Microsoft.Extensions.Logging;
+    using ModelContextProtocol;
+    using ModelContextProtocol.Client;
+    using OpenAI;
+    using OpenTelemetry;
+    using OpenTelemetry.Logs;
+    using OpenTelemetry.Metrics;
+    using OpenTelemetry.Trace;
+
+    using var tracerProvider = Sdk.CreateTracerProviderBuilder()
+        .AddHttpClientInstrumentation()
+        .AddSource("*")
+        .AddOtlpExporter()
+        .Build();
+    using var metricsProvider = Sdk.CreateMeterProviderBuilder()
+        .AddHttpClientInstrumentation()
+        .AddMeter("*")
+        .AddOtlpExporter()
+        .Build();
+    using var loggerFactory = LoggerFactory.Create(builder => builder.AddOpenTelemetry(opt => opt.AddOtlpExporter()));
+    ```
+
+    <Note>
+      OpenTelemetry instrumentation is optional but highly recommended for production applications to monitor MCP interactions.
+    </Note>
+  </Step>
+
+  <Step title="Create the OpenAI client">
+    Set up the OpenAI client with Microsoft.Extensions.AI integration.
+
+    ```csharp Program.cs (part 2)
+    // Create OpenAI client (or any other compatible with IChatClient)
+    // Provide your own OPENAI_API_KEY via an environment variable.
+    var openAIClient = new OpenAIClient(Environment.GetEnvironmentVariable("OPENAI_API_KEY")).GetChatClient("gpt-4o-mini");
+
+    // Create a sampling client.
+    using IChatClient samplingClient = openAIClient.AsIChatClient()
+        .AsBuilder()
+        .UseOpenTelemetry(loggerFactory: loggerFactory, configure: o => o.EnableSensitiveData = true)
+        .Build();
+    ```
+  </Step>
+
+  <Step title="Connect to the MCP server">
+    Create an MCP client that connects to a server and provides sampling capabilities.
+
+    ```csharp Program.cs (part 3)
+    Console.WriteLine("Connecting client to MCP 'everything' server");
+
+    var mcpClient = await McpClient.CreateAsync(
+        new StdioClientTransport(new()
+        {
+            Command = "npx",
+            Arguments = ["-y", "--verbose", "@modelcontextprotocol/server-everything"],
+            Name = "Everything",
+        }),
+        clientOptions: new()
+        {
+            Handlers = new()
+            {
+                SamplingHandler = samplingClient.CreateSamplingHandler()
+            }
+        },
+        loggerFactory: loggerFactory);
+    ```
+
+    <Tip>
+      This example connects to the Node.js "everything" server, but you can connect to any MCP server by changing the command and arguments.
+    </Tip>
+  </Step>
+
+  <Step title="List available tools">
+    Retrieve and display all tools available from the MCP server.
+
+    ```csharp Program.cs (part 4)
+    // Get all available tools
+    Console.WriteLine("Tools available:");
+    var tools = await mcpClient.ListToolsAsync();
+    foreach (var tool in tools)
+    {
+        Console.WriteLine($"  {tool}");
+    }
+
+    Console.WriteLine();
+    ```
+  </Step>
+
+  <Step title="Create the chat loop">
+    Implement the interactive chat interface with tool calling.
+
+    ```csharp Program.cs (part 5)
+    // Create an IChatClient that can use the tools.
+    using IChatClient chatClient = openAIClient.AsIChatClient()
+        .AsBuilder()
+        .UseFunctionInvocation()
+        .UseOpenTelemetry(loggerFactory: loggerFactory, configure: o => o.EnableSensitiveData = true)
+        .Build();
+
+    // Have a conversation, making all tools available to the LLM.
+    List<ChatMessage> messages = [];
+    while (true)
+    {
+        Console.Write("Q: ");
+        messages.Add(new(ChatRole.User, Console.ReadLine()));
+
+        List<ChatResponseUpdate> updates = [];
+        await foreach (var update in chatClient.GetStreamingResponseAsync(messages, new() { Tools = [.. tools] }))
+        {
+            Console.Write(update);
+            updates.Add(update);
+        }
+        Console.WriteLine();
+
+        messages.AddMessages(updates);
+    }
+    ```
+
+    <Note>
+      The `.UseFunctionInvocation()` middleware automatically handles tool calls from the LLM, invoking MCP tools and adding results back to the conversation.
+    </Note>
+  </Step>
+
+  <Step title="Create the project file">
+    ```xml ChatWithTools.csproj
+    <Project Sdk="Microsoft.NET.Sdk">
+
+      <PropertyGroup>
+        <OutputType>Exe</OutputType>
+        <TargetFramework>net8.0</TargetFramework>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <Nullable>enable</Nullable>
+      </PropertyGroup>
+
+      <ItemGroup>
+        <PackageReference Include="Microsoft.Extensions.AI" />
+        <PackageReference Include="Microsoft.Extensions.AI.OpenAI" />
+        <PackageReference Include="OpenTelemetry.Exporter.OpenTelemetryProtocol" />
+        <PackageReference Include="OpenTelemetry.Instrumentation.Http" />
+      </ItemGroup>
+
+      <ItemGroup>
+        <ProjectReference Include="..\..\src\ModelContextProtocol.Core\ModelContextProtocol.Core.csproj" />
+      </ItemGroup>
+
+    </Project>
+    ```
+  </Step>
+</Steps>
+
+## Running the Client
+
+<Steps>
+  <Step title="Set your OpenAI API key">
+    ```bash
+    export OPENAI_API_KEY="your-api-key-here"
+    ```
+  </Step>
+
+  <Step title="Ensure you have Node.js installed">
+    The example connects to an npm-based MCP server, so you need Node.js and npx available.
+  </Step>
+
+  <Step title="Run the client">
+    ```bash
+    dotnet run
+    ```
+  </Step>
+
+  <Step title="Start chatting">
+    The client will display available tools and start an interactive prompt:
+
+    ```
+    Connecting client to MCP 'everything' server
+    Tools available:
+      add
+      echo
+      ...
+
+    Q: What's the weather like in Seattle?
+    ```
+
+    The LLM will automatically call the appropriate MCP tools to answer your questions.
+  </Step>
+</Steps>
+
+## Key Concepts
+
+### MCP Client Creation
+
+Create an MCP client with stdio transport:
+
+```csharp
+var mcpClient = await McpClient.CreateAsync(
+    new StdioClientTransport(new()
+    {
+        Command = "npx",
+        Arguments = ["-y", "@modelcontextprotocol/server-everything"],
+        Name = "Everything",
+    }),
+    clientOptions: new()
+    {
+        Handlers = new()
+        {
+            SamplingHandler = samplingClient.CreateSamplingHandler()
+        }
+    });
+```
+
+### Microsoft.Extensions.AI Integration
+
+The MCP SDK integrates seamlessly with Microsoft.Extensions.AI:
+
+```csharp
+using IChatClient chatClient = openAIClient.AsIChatClient()
+    .AsBuilder()
+    .UseFunctionInvocation()  // Enables automatic tool calling
+    .Build();
+```
+
+### Tool Discovery and Usage
+
+List tools from the server and pass them to the LLM:
+
+```csharp
+var tools = await mcpClient.ListToolsAsync();
+await chatClient.GetResponseAsync(messages, new() { Tools = [.. tools] });
+```
+
+The SDK automatically converts MCP tools to the format expected by the LLM.
+
+### Sampling Handler
+
+The sampling handler allows MCP servers to request LLM completions through the client:
+
+```csharp
+clientOptions: new()
+{
+    Handlers = new()
+    {
+        SamplingHandler = samplingClient.CreateSamplingHandler()
+    }
+}
+```
+
+This enables advanced scenarios where servers need AI capabilities.
+
+## Next Steps
+
+- Build your own [MCP server](/examples/weather-server) with custom tools
+- Learn about [HTTP-based servers](/examples/http-server) for web deployments
+- Explore [protected servers](/examples/protected-server) with OAuth authentication

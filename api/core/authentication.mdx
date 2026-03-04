@@ -1,0 +1,377 @@
+---
+title: Authentication Classes
+description: API reference for OAuth authentication classes in the MCP C# SDK
+---
+
+The MCP C# SDK provides OAuth 2.0 authentication support for HTTP-based transports, implementing the authorization code flow with PKCE (Proof Key for Code Exchange).
+
+## Namespace
+
+```csharp
+ModelContextProtocol.Authentication
+```
+
+## Overview
+
+Authentication in the MCP SDK follows the OAuth 2.0 Authorization Code Flow with PKCE as specified in RFC 7636. The SDK handles:
+
+- Protected Resource Metadata discovery (RFC 9728)
+- Authorization Server Metadata discovery
+- Dynamic Client Registration (RFC 7591)
+- Authorization code exchange
+- Token refresh
+- Token caching
+
+## ClientOAuthOptions
+
+Provides configuration options for OAuth authentication.
+
+```csharp
+public sealed class ClientOAuthOptions
+```
+
+### Properties
+
+<ResponseField name="RedirectUri" type="Uri" required>
+  The OAuth redirect URI where the authorization code will be sent.
+</ResponseField>
+
+<ResponseField name="ClientId" type="string">
+  The OAuth client ID. If not provided, the client will attempt to register dynamically.
+</ResponseField>
+
+<ResponseField name="ClientSecret" type="string">
+  The OAuth client secret. Optional for public clients or when using PKCE without client authentication.
+</ResponseField>
+
+<ResponseField name="ClientMetadataDocumentUri" type="Uri">
+  The HTTPS URL pointing to this client's metadata document. When specified and the authorization server supports it, this URL is sent as the client identifier instead of performing dynamic client registration.
+</ResponseField>
+
+<ResponseField name="Scopes" type="IEnumerable<string>">
+  The OAuth scopes to request. When specified, these scopes override the scopes advertised by the protected resource.
+</ResponseField>
+
+<ResponseField name="AuthorizationRedirectDelegate" type="AuthorizationRedirectDelegate">
+  The authorization redirect delegate for handling the OAuth authorization flow. If not specified, a default implementation prompts the user to enter the code manually.
+</ResponseField>
+
+<ResponseField name="AuthServerSelector" type="Func<IReadOnlyList<Uri>, Uri>">
+  The authorization server selector function. Used to select which authorization server to use when multiple servers are available. If not specified, the first available server is selected.
+</ResponseField>
+
+<ResponseField name="DynamicClientRegistration" type="DynamicClientRegistrationOptions">
+  Options to use during dynamic client registration. Only used when no ClientId is specified.
+</ResponseField>
+
+<ResponseField name="AdditionalAuthorizationParameters" type="IDictionary<string, string>">
+  Additional parameters to include in the query string of the OAuth authorization request. Cannot override automatically set parameters like "redirect_uri".
+</ResponseField>
+
+<ResponseField name="TokenCache" type="ITokenCache">
+  The token cache to use for storing and retrieving tokens beyond the lifetime of the transport. If not provided, an in-memory cache is used.
+</ResponseField>
+
+## AuthorizationRedirectDelegate
+
+Delegate for handling OAuth authorization redirects.
+
+```csharp
+public delegate Task<string?> AuthorizationRedirectDelegate(
+    Uri authorizationUrl,
+    Uri redirectUri,
+    CancellationToken cancellationToken);
+```
+
+<ParamField path="authorizationUrl" type="Uri" required>
+  The authorization URL to present to the user.
+</ParamField>
+
+<ParamField path="redirectUri" type="Uri" required>
+  The redirect URI where the authorization code will be sent.
+</ParamField>
+
+<ParamField path="cancellationToken" type="CancellationToken">
+  Cancellation token to monitor for cancellation requests.
+</ParamField>
+
+**Returns:** The authorization code extracted from the redirect, or null if authorization failed.
+
+## DynamicClientRegistrationOptions
+
+Configuration for OAuth Dynamic Client Registration (RFC 7591).
+
+```csharp
+public sealed class DynamicClientRegistrationOptions
+```
+
+<ResponseField name="ClientName" type="string">
+  Human-readable name of the client to be presented to the end-user during authorization.
+</ResponseField>
+
+<ResponseField name="ClientUri" type="Uri">
+  URL of the home page of the client.
+</ResponseField>
+
+<ResponseField name="InitialAccessToken" type="string">
+  Initial access token to include in the registration request as specified by the authorization server.
+</ResponseField>
+
+<ResponseField name="ResponseDelegate" type="Func<DynamicClientRegistrationResponse, CancellationToken, Task>">
+  Callback invoked with the registration response, allowing the application to persist client credentials.
+</ResponseField>
+
+## ITokenCache
+
+Interface for caching OAuth tokens.
+
+```csharp
+public interface ITokenCache
+{
+    Task<TokenContainer?> GetTokensAsync(CancellationToken cancellationToken = default);
+    Task StoreTokensAsync(TokenContainer tokens, CancellationToken cancellationToken = default);
+}
+```
+
+### InMemoryTokenCache
+
+Default in-memory implementation of `ITokenCache`.
+
+```csharp
+public sealed class InMemoryTokenCache : ITokenCache
+```
+
+## Usage Examples
+
+### Basic OAuth Authentication
+
+```csharp
+using ModelContextProtocol.Client;
+using ModelContextProtocol.Authentication;
+
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = new ClientOAuthOptions
+    {
+        ClientId = "your-client-id",
+        ClientSecret = "your-client-secret",
+        RedirectUri = new Uri("http://localhost:3000/callback"),
+        Scopes = ["read", "write"]
+    }
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Custom Authorization Redirect Handler
+
+```csharp
+var oauth = new ClientOAuthOptions
+{
+    ClientId = "your-client-id",
+    RedirectUri = new Uri("http://localhost:3000/callback"),
+    AuthorizationRedirectDelegate = async (authUrl, redirectUri, ct) =>
+    {
+        // Open browser to authorization URL
+        System.Diagnostics.Process.Start(new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = authUrl.ToString(),
+            UseShellExecute = true
+        });
+
+        // Start local HTTP server to capture redirect
+        using var listener = new HttpListener();
+        listener.Prefixes.Add($"{redirectUri.GetLeftPart(UriPartial.Authority)}/");
+        listener.Start();
+
+        var context = await listener.GetContextAsync();
+        var code = context.Request.QueryString["code"];
+
+        // Send response to browser
+        var response = context.Response;
+        var buffer = System.Text.Encoding.UTF8.GetBytes("Authorization successful! You can close this window.");
+        response.ContentLength64 = buffer.Length;
+        await response.OutputStream.WriteAsync(buffer, ct);
+        response.Close();
+
+        return code;
+    }
+};
+
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = oauth
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Dynamic Client Registration
+
+```csharp
+var oauth = new ClientOAuthOptions
+{
+    RedirectUri = new Uri("http://localhost:3000/callback"),
+    DynamicClientRegistration = new DynamicClientRegistrationOptions
+    {
+        ClientName = "My MCP Client",
+        ClientUri = new Uri("https://myapp.example.com"),
+        ResponseDelegate = async (response, ct) =>
+        {
+            // Persist the registered client credentials
+            await File.WriteAllTextAsync(
+                "client-credentials.json",
+                JsonSerializer.Serialize(new
+                {
+                    ClientId = response.ClientId,
+                    ClientSecret = response.ClientSecret
+                }),
+                ct);
+            
+            Console.WriteLine($"Registered client: {response.ClientId}");
+        }
+    }
+};
+
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = oauth
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Custom Token Cache
+
+```csharp
+public class FileTokenCache : ITokenCache
+{
+    private readonly string _filePath;
+
+    public FileTokenCache(string filePath)
+    {
+        _filePath = filePath;
+    }
+
+    public async Task<TokenContainer?> GetTokensAsync(CancellationToken cancellationToken = default)
+    {
+        if (!File.Exists(_filePath))
+            return null;
+
+        var json = await File.ReadAllTextAsync(_filePath, cancellationToken);
+        return JsonSerializer.Deserialize<TokenContainer>(json);
+    }
+
+    public async Task StoreTokensAsync(TokenContainer tokens, CancellationToken cancellationToken = default)
+    {
+        var json = JsonSerializer.Serialize(tokens);
+        await File.WriteAllTextAsync(_filePath, json, cancellationToken);
+    }
+}
+
+// Usage
+var oauth = new ClientOAuthOptions
+{
+    ClientId = "your-client-id",
+    ClientSecret = "your-client-secret",
+    RedirectUri = new Uri("http://localhost:3000/callback"),
+    TokenCache = new FileTokenCache("tokens.json")
+};
+
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = oauth
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Multiple Authorization Servers
+
+```csharp
+var oauth = new ClientOAuthOptions
+{
+    ClientId = "your-client-id",
+    RedirectUri = new Uri("http://localhost:3000/callback"),
+    AuthServerSelector = servers =>
+    {
+        // Prefer auth.example.com if available
+        var preferred = servers.FirstOrDefault(s => 
+            s.Host.Equals("auth.example.com", StringComparison.OrdinalIgnoreCase));
+        
+        return preferred ?? servers.FirstOrDefault();
+    }
+};
+
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = oauth
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+### Additional Authorization Parameters
+
+```csharp
+var oauth = new ClientOAuthOptions
+{
+    ClientId = "your-client-id",
+    RedirectUri = new Uri("http://localhost:3000/callback"),
+    AdditionalAuthorizationParameters = new Dictionary<string, string>
+    {
+        ["prompt"] = "consent",
+        ["access_type"] = "offline",
+        ["state"] = "custom-state-value"
+    }
+};
+
+var transport = new HttpClientTransport(new HttpClientTransportOptions
+{
+    Endpoint = new Uri("https://api.example.com/mcp"),
+    OAuth = oauth
+});
+
+await using var client = await McpClient.CreateAsync(transport);
+```
+
+## Authentication Flow
+
+The OAuth authentication flow in the SDK follows these steps:
+
+1. **Initial Request**: Client makes a request to the protected MCP server
+2. **401/403 Challenge**: Server responds with `WWW-Authenticate: Bearer` header
+3. **Protected Resource Metadata Discovery**: Client fetches resource metadata to discover authorization servers
+4. **Authorization Server Selection**: Client selects an authorization server (using `AuthServerSelector` if multiple are available)
+5. **Authorization Server Metadata Discovery**: Client fetches AS metadata from `.well-known` endpoints
+6. **Dynamic Client Registration** (if needed): Client registers with the AS to obtain credentials
+7. **Authorization Request**: Client builds authorization URL and invokes `AuthorizationRedirectDelegate`
+8. **User Authorization**: User authorizes the client (handled by custom delegate)
+9. **Token Exchange**: Client exchanges authorization code for access token using PKCE
+10. **Token Storage**: Tokens are stored in the configured `ITokenCache`
+11. **Retry Request**: Original request is retried with `Authorization: Bearer <token>` header
+12. **Token Refresh**: When tokens expire, refresh token is automatically used to obtain new tokens
+
+## Security Considerations
+
+- Always use HTTPS endpoints in production (`https://` URIs)
+- Store client secrets securely (use environment variables or secret management systems)
+- Implement secure token storage (encrypt tokens at rest, use OS credential stores)
+- Use PKCE (the SDK handles this automatically)
+- Validate redirect URIs to prevent authorization code interception
+- Consider token expiration and implement appropriate refresh logic
+- For public clients, avoid storing client secrets
+
+## See Also
+
+- [HttpClientTransport](/api/core/transports#http-client-transport) - HTTP transport using OAuth
+- [MCP Specification - Authorization](https://modelcontextprotocol.io/specification/2025-11-25/basic/authorization) - Official OAuth specification for MCP
+- [RFC 6749](https://datatracker.ietf.org/doc/html/rfc6749) - OAuth 2.0 Authorization Framework
+- [RFC 7636](https://datatracker.ietf.org/doc/html/rfc7636) - PKCE
+- [RFC 7591](https://datatracker.ietf.org/doc/html/rfc7591) - Dynamic Client Registration
+- [RFC 9728](https://datatracker.ietf.org/doc/html/rfc9728) - Protected Resource Metadata

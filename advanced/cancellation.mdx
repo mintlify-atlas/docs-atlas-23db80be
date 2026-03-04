@@ -1,0 +1,295 @@
+---
+title: Request Cancellation
+description: Cancel in-flight MCP requests using cancellation tokens and notifications
+---
+
+MCP supports [cancellation](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/cancellation) of in-flight requests. Either the client or server can cancel a previously issued request using standard .NET `CancellationToken` parameters.
+
+## How Cancellation Works
+
+The MCP C# SDK automatically maps `CancellationToken` cancellation to MCP `notifications/cancelled` protocol messages:
+
+1. **Client cancels**: When a client cancels a `CancellationToken` passed to a method like `CallToolAsync`, the SDK sends a `notifications/cancelled` message to the server
+2. **Server receives**: The server's `CancellationToken` parameter is triggered, allowing the handler to stop work gracefully
+3. **Bidirectional**: This works in both directions - clients can cancel server requests, and servers can cancel client requests
+
+<CodeGroup>
+```csharp Client Side
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+
+try
+{
+    var result = await client.CallToolAsync(
+        "longOperation",
+        cancellationToken: cts.Token);
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Operation was cancelled");
+}
+```
+
+```csharp Server Side
+[McpServerTool]
+[Description("A long-running computation")]
+public static async Task<string> LongComputation(
+    [Description("Number of iterations")] int iterations,
+    CancellationToken cancellationToken)
+{
+    for (int i = 0; i < iterations; i++)
+    {
+        // Pass the token to async operations
+        await Task.Delay(1000, cancellationToken);
+    }
+
+    return $"Completed {iterations} iterations.";
+}
+```
+</CodeGroup>
+
+## Server-Side Cancellation
+
+### Basic Pattern
+
+Server tools receive a `CancellationToken` that triggers when the client sends a cancellation notification:
+
+```csharp
+[McpServerTool]
+[Description("Processes a large dataset")]
+public static async Task<string> ProcessDataset(
+    [Description("Number of records")] int recordCount,
+    CancellationToken cancellationToken)
+{
+    for (int i = 0; i < recordCount; i++)
+    {
+        // Check for cancellation
+        cancellationToken.ThrowIfCancellationRequested();
+
+        // Process record
+        await ProcessRecordAsync(i, cancellationToken);
+    }
+
+    return $"Processed {recordCount} records";
+}
+```
+
+### Passing Tokens to Dependencies
+
+Always pass the `CancellationToken` to async methods and operations:
+
+```csharp
+[McpServerTool]
+public static async Task<string> FetchAndProcess(
+    string url,
+    CancellationToken cancellationToken)
+{
+    using var httpClient = new HttpClient();
+
+    // Pass token to HTTP request
+    var response = await httpClient.GetAsync(url, cancellationToken);
+    var data = await response.Content.ReadAsStringAsync(cancellationToken);
+
+    // Pass token to database operation
+    await SaveToDatabase(data, cancellationToken);
+
+    return "Processing complete";
+}
+```
+
+### Cleanup on Cancellation
+
+Use try-finally or `await using` to ensure cleanup happens even when cancelled:
+
+```csharp
+[McpServerTool]
+public static async Task<string> ProcessWithResources(
+    string filePath,
+    CancellationToken cancellationToken)
+{
+    await using var stream = File.OpenRead(filePath);
+    try
+    {
+        // Process file
+        await ProcessStreamAsync(stream, cancellationToken);
+        return "Success";
+    }
+    catch (OperationCanceledException)
+    {
+        // Log cancellation
+        Console.WriteLine("Processing was cancelled");
+        throw; // Re-throw to propagate cancellation
+    }
+    // Stream is automatically disposed even if cancelled
+}
+```
+
+## Client-Side Cancellation
+
+### Timeout Pattern
+
+Set a timeout for long-running operations:
+
+```csharp
+using var cts = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+
+try
+{
+    var result = await client.CallToolAsync(
+        "complexAnalysis",
+        new Dictionary<string, object> { { "dataset", "large.csv" } },
+        cancellationToken: cts.Token);
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Operation timed out after 30 seconds");
+}
+```
+
+### User-Initiated Cancellation
+
+Allow users to cancel operations:
+
+```csharp
+var cts = new CancellationTokenSource();
+
+Console.WriteLine("Press 'C' to cancel...");
+
+var task = client.CallToolAsync(
+    "longOperation",
+    cancellationToken: cts.Token);
+
+var keyTask = Task.Run(() =>
+{
+    if (Console.ReadKey(true).Key == ConsoleKey.C)
+    {
+        cts.Cancel();
+        Console.WriteLine("\nCancelling operation...");
+    }
+});
+
+try
+{
+    await task;
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Operation was cancelled by user");
+}
+```
+
+### Combining Multiple Tokens
+
+Combine app lifetime, timeout, and user cancellation:
+
+```csharp
+var appLifetime = GetApplicationLifetimeToken();
+var timeout = new CancellationTokenSource(TimeSpan.FromMinutes(5));
+var userCancel = new CancellationTokenSource();
+
+using var combined = CancellationTokenSource.CreateLinkedTokenSource(
+    appLifetime,
+    timeout.Token,
+    userCancel.Token);
+
+try
+{
+    var result = await client.CallToolAsync(
+        "operation",
+        cancellationToken: combined.Token);
+}
+catch (OperationCanceledException)
+{
+    Console.WriteLine("Operation cancelled");
+}
+```
+
+## Observing Cancellation Notifications
+
+You can register a handler to observe cancellation notifications:
+
+```csharp
+mcpClient.RegisterNotificationHandler(
+    NotificationMethods.CancelledNotification,
+    (notification, ct) =>
+    {
+        var cancelled = notification.Params?.Deserialize<CancelledNotificationParams>(
+            McpJsonUtilities.DefaultOptions);
+        if (cancelled is not null)
+        {
+            Console.WriteLine($"Request {cancelled.RequestId} cancelled: {cancelled.Reason}");
+        }
+        return default;
+    });
+```
+
+## Cancellation Notification Details
+
+The `notifications/cancelled` notification includes:
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `RequestId` | `string` | The ID of the request to cancel |
+| `Reason` | `string?` | Optional human-readable cancellation reason |
+
+## Best Practices
+
+<Steps>
+  <Step title="Always accept CancellationToken">
+    Add a `CancellationToken` parameter to all async tools, even if they complete quickly:
+
+    ```csharp
+    public static async Task<string> MyTool(
+        string param,
+        CancellationToken cancellationToken) // Always include
+    ```
+  </Step>
+
+  <Step title="Pass tokens to all async operations">
+    Ensure cancellation propagates through your entire call chain:
+
+    ```csharp
+    await httpClient.GetAsync(url, cancellationToken);
+    await dbContext.SaveChangesAsync(cancellationToken);
+    await Task.Delay(1000, cancellationToken);
+    ```
+  </Step>
+
+  <Step title="Check cancellation in loops">
+    For CPU-bound work, periodically check for cancellation:
+
+    ```csharp
+    for (int i = 0; i < largeNumber; i++)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        // Do work
+    }
+    ```
+  </Step>
+
+  <Step title="Handle OperationCanceledException">
+    Catch cancellation exceptions appropriately:
+
+    ```csharp
+    try
+    {
+        await operation(cancellationToken);
+    }
+    catch (OperationCanceledException)
+    {
+        // Clean up and log
+        throw; // Usually re-throw
+    }
+    ```
+  </Step>
+</Steps>
+
+<Note>
+  When a `CancellationToken` is cancelled, the `OperationCanceledException` propagates back to the client as a cancellation response in the MCP protocol.
+</Note>
+
+## API Reference
+
+- [`CancellationToken`](https://learn.microsoft.com/dotnet/api/system.threading.cancellationtoken) - .NET cancellation token
+- [`NotificationMethods.CancelledNotification`](https://github.com/modelcontextprotocol/csharp-sdk) - Cancellation notification constant
+- [`CancelledNotificationParams`](https://github.com/modelcontextprotocol/csharp-sdk) - Cancellation notification parameters
+- [Task Cancellation](https://learn.microsoft.com/dotnet/standard/parallel-programming/task-cancellation) - .NET task cancellation guide
