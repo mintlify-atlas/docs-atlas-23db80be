@@ -1,0 +1,152 @@
+{
+  "projectType": "sdk-library",
+  "projectName": "MCP C# SDK",
+  "projectDescription": "Official C# SDK for the Model Context Protocol, enabling .NET applications to implement MCP clients and servers",
+  "theme": "palm",
+  "primaryColor": "#512BD4",
+  "lightColor": "#7C4DFF",
+  "darkColor": "#311B92",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Get Started",
+            "pages": [
+              "introduction",
+              "installation",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Core Concepts",
+            "pages": [
+              "concepts/architecture",
+              "concepts/clients",
+              "concepts/servers",
+              "concepts/transports",
+              "concepts/capabilities"
+            ]
+          },
+          {
+            "group": "Building Servers",
+            "pages": [
+              "servers/tools",
+              "servers/resources",
+              "servers/prompts",
+              "servers/completions",
+              "servers/logging",
+              "servers/filters",
+              "servers/aspnetcore"
+            ]
+          },
+          {
+            "group": "Building Clients",
+            "pages": [
+              "clients/connecting",
+              "clients/llm-integration",
+              "clients/sampling",
+              "clients/roots",
+              "clients/elicitation"
+            ]
+          },
+          {
+            "group": "Advanced Topics",
+            "pages": [
+              "advanced/progress",
+              "advanced/cancellation",
+              "advanced/pagination",
+              "advanced/tasks",
+              "advanced/authentication",
+              "advanced/httpcontext"
+            ]
+          },
+          {
+            "group": "Examples",
+            "pages": [
+              "examples/weather-server",
+              "examples/chat-client",
+              "examples/http-server",
+              "examples/protected-server"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "API Reference",
+        "groups": [
+          {
+            "group": "Core Package",
+            "pages": [
+              "api/core/mcp-client",
+              "api/core/mcp-session",
+              "api/core/protocol-types",
+              "api/core/transports",
+              "api/core/authentication"
+            ]
+          },
+          {
+            "group": "Main Package",
+            "pages": [
+              "api/main/server-builder",
+              "api/main/hosting",
+              "api/main/attributes"
+            ]
+          },
+          {
+            "group": "ASP.NET Core Package",
+            "pages": [
+              "api/aspnetcore/http-transport",
+              "api/aspnetcore/session-management",
+              "api/aspnetcore/middleware"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "Resources",
+        "groups": [
+          {
+            "group": "Additional Info",
+            "pages": [
+              "resources/packages",
+              "resources/versioning",
+              "resources/experimental",
+              "resources/roadmap",
+              "resources/contributing"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "Multi-package architecture with Core, main, and ASP.NET Core packages",
+    "Client SDK for connecting to any MCP server",
+    "Server SDK with attribute-based tool, prompt, and resource discovery",
+    "Multiple transport options: stdio, HTTP, and SSE",
+    "Integration with Microsoft.Extensions.AI for seamless LLM usage",
+    "Dependency injection and hosting support",
+    "OAuth authentication support",
+    "Progress tracking and cancellation",
+    "Native AOT compatibility"
+  ],
+  "publicApiSurface": [
+    "McpClient - Client for connecting to MCP servers",
+    "McpServer - Base server implementation",
+    "McpSession - Session management",
+    "StdioClientTransport - Stdio transport for clients",
+    "HttpClientTransport - HTTP transport for clients",
+    "AddMcpServer() - DI extension for server setup",
+    "[McpServerTool] - Attribute for marking tool methods",
+    "[McpServerPrompt] - Attribute for marking prompt methods",
+    "[McpServerResource] - Attribute for marking resource methods",
+    "McpServerBuilderExtensions - Extensions for server configuration",
+    "MapMcp() - ASP.NET Core endpoint mapping",
+    "ClientOAuthProvider - OAuth authentication provider",
+    "McpSessionHandler - Request/notification handler base class",
+    "Protocol types (Tool, Prompt, Resource, etc.)",
+    "UriTemplate - URI template matching for resources"
+  ]
+}
